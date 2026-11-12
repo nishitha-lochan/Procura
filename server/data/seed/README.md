@@ -5,7 +5,7 @@ This directory contains intentional, pre-configured sample data for the Procura 
 ## Files
 
 - `sample_orders.json`: 23 baseline procurement orders (including Sandbox verified orders, simulation records, and quotation comparisons) used to populate dashboard charts, order history, and status trackers on a fresh installation.
-- `sample_transactions.json`: 6 verified financial ledger settlements showcasing landed cost distributions, realized corporate savings, and multi-mode payment badges (`SANDBOX_VERIFIED` and `SIMULATION`).
+- `sample_transactions.json`: 6 financial ledger records (4 verified PayPal Sandbox settlements and 2 historical sample benchmark records) showcasing landed cost distributions, realized corporate savings, and multi-mode payment badges (`SANDBOX_VERIFIED` and `SAMPLE_DATA`).
 
 ## Demonstration Fixtures Lifecycle
 

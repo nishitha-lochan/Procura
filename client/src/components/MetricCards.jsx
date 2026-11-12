@@ -445,8 +445,8 @@ export default function MetricCards({
             <span>Peak settlement: <strong>${(timelineData.length > 0 ? Math.max(...timelineData.map(d => d.spend), 0) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
             <span style={{ color: transactions.length > 0 ? 'var(--accent-mint)' : 'var(--text-muted)' }}>
               {transactions.length > 0
-                ? `${transactions.length} Verified Settlement${transactions.length === 1 ? '' : 's'}`
-                : 'Awaiting Settlements'}
+                ? `${transactions.length} Recorded Transaction${transactions.length === 1 ? '' : 's'}`
+                : 'Awaiting Transactions'}
             </span>
           </div>
         </div>
