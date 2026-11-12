@@ -1,6 +1,12 @@
 import axios from 'axios';
 
-const API_BASE = '/api';
+// Backend API Base Configuration:
+// Reads from VITE_API_URL in production (e.g. deployed on Vercel pointing to Render)
+// Falls back to '/api' for local development to use Vite's built-in dev proxy.
+const rawBase = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+const API_BASE = rawBase
+  ? (rawBase.endsWith('/api') ? rawBase : `${rawBase}/api`)
+  : '/api';
 
 export const api = {
   // Backend Health & Configuration

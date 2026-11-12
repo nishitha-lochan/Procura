@@ -19,9 +19,36 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS
+// Build list of allowed origins
+const defaultLocalOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+];
+
+// Support comma-separated CLIENT_URL origins (e.g. "https://procura.vercel.app,https://procura-preview.vercel.app")
+const configuredClientUrls = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map(url => url.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+const allowedOrigins = Array.from(new Set([...defaultLocalOrigins, ...configuredClientUrls]));
+
+// Enable CORS with strict origin validation (no wildcards)
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'],
+  origin: (origin, callback) => {
+    // Allow non-browser requests (e.g. curl, Render health checks, server-to-server) without Origin header
+    if (!origin) return callback(null, true);
+    
+    const cleanOrigin = origin.trim().replace(/\/+$/, '');
+    if (allowedOrigins.some(allowed => allowed.toLowerCase() === cleanOrigin.toLowerCase())) {
+      return callback(null, true);
+    }
+    
+    console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
+    return callback(new Error(`CORS policy: Origin ${origin} is not allowed`));
+  },
   credentials: true
 }));
 

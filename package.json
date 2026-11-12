@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Procura — AI-Powered B2B Procurement Copilot & PayPal Settlement Engine",
   "scripts": {
+    "start": "node server/server.js",
     "install:all": "npm --prefix server install && npm --prefix client install",
     "server": "npm --prefix server run dev",
     "client": "npm --prefix client run dev",
