@@ -13,9 +13,18 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ORDERS_FILE = path.join(__dirname, '../data/orders.json');
-const TRANSACTIONS_FILE = path.join(__dirname, '../data/transactions.json');
-const SUPPLIERS_FILE = path.join(__dirname, '../data/suppliers.json');
+
+export function getOrdersFilePath() {
+  return process.env.ORDERS_FILE_PATH || path.join(__dirname, '../data/orders.json');
+}
+
+export function getTransactionsFilePath() {
+  return process.env.TRANSACTIONS_FILE_PATH || path.join(__dirname, '../data/transactions.json');
+}
+
+export function getSuppliersFilePath() {
+  return process.env.SUPPLIERS_FILE_PATH || path.join(__dirname, '../data/suppliers.json');
+}
 
 // Global mutex lock keys enforcing strict hierarchical lock order:
 // Level 1: `order-lock-${orderId}`
@@ -83,7 +92,7 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
   }
   const quantity = Number(quantityRequested);
 
-  const suppliers = await readJsonFile(SUPPLIERS_FILE, []);
+  const suppliers = await readJsonFile(getSuppliersFilePath(), []);
   const supplier = suppliers.find(s => s.supplierId === supplierId.trim());
 
   if (!supplier) {
@@ -140,9 +149,9 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
     // Shared orders-file lock prevents concurrent createOrder race conditions
     const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
     try {
-      const orders = await readJsonFile(ORDERS_FILE, []);
+      const orders = await readJsonFile(getOrdersFilePath(), []);
       orders.push(pendingOrder);
-      await writeJsonFile(ORDERS_FILE, orders);
+      await writeJsonFile(getOrdersFilePath(), orders);
     } finally {
       releaseOrders();
     }
@@ -213,9 +222,9 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
   // Shared orders-file lock prevents concurrent createOrder race conditions
   const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
   try {
-    const orders = await readJsonFile(ORDERS_FILE, []);
+    const orders = await readJsonFile(getOrdersFilePath(), []);
     orders.push(pendingOrder);
-    await writeJsonFile(ORDERS_FILE, orders);
+    await writeJsonFile(getOrdersFilePath(), orders);
   } finally {
     releaseOrders();
   }
@@ -252,7 +261,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
     // Read and transition to CAPTURING under shared orders-file lock
     const releaseInitialOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
     try {
-      const orders = await readJsonFile(ORDERS_FILE, []);
+      const orders = await readJsonFile(getOrdersFilePath(), []);
       orderIndex = orders.findIndex(o => o.orderId === orderId);
 
       if (orderIndex === -1) {
@@ -288,7 +297,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       // Transition state to CAPTURING
       order.status = 'CAPTURING';
       orders[orderIndex] = order;
-      await writeJsonFile(ORDERS_FILE, orders);
+      await writeJsonFile(getOrdersFilePath(), orders);
     } finally {
       releaseInitialOrders();
     }
@@ -318,7 +327,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
 
         const releaseErrorOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
 
           if (issue === 'ORDER_NOT_APPROVED') {
@@ -326,7 +335,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
             if (idx !== -1) {
               freshOrders[idx].status = 'CREATED';
               delete freshOrders[idx].reconciliationReason;
-              await writeJsonFile(ORDERS_FILE, freshOrders);
+              await writeJsonFile(getOrdersFilePath(), freshOrders);
             }
             const error = new Error('Payment was not approved yet. Please log into the PayPal popup and click "Pay Now" or "Complete Purchase".');
             error.statusCode = 422;
@@ -338,7 +347,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
             if (idx !== -1) {
               freshOrders[idx].status = 'CAPTURE_UNKNOWN';
               freshOrders[idx].reconciliationReason = 'PayPal indicates ORDER_ALREADY_CAPTURED. Reconciliation required.';
-              await writeJsonFile(ORDERS_FILE, freshOrders);
+              await writeJsonFile(getOrdersFilePath(), freshOrders);
             }
             const error = new Error('Order was already captured on PayPal. Reconciling transaction record.');
             error.statusCode = 409;
@@ -350,7 +359,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
             freshOrders[idx].status = 'CAPTURE_UNKNOWN';
             freshOrders[idx].reconciliationReason = `Uncertain outcome during capture dispatch: ${err.message}`;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
 
           const error = new Error(`Payment capture outcome uncertain (${err.message}). Status locked as CAPTURE_UNKNOWN to prevent duplicate charge.`);
@@ -368,12 +377,12 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       if (captureStatus !== 'COMPLETED') {
         const releaseNonComplete = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'CAPTURE_UNKNOWN';
             freshOrders[idx].reconciliationReason = `Non-completed PayPal status returned: ${captureStatus}`;
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseNonComplete();
@@ -387,30 +396,34 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       const captureUnit = captureData.purchase_units?.[0]?.payments?.captures?.[0];
       captureId = captureUnit?.id || `CAP-${Date.now()}`;
       const capturedAmountStr = captureUnit?.amount?.value || order.amount;
-      const capturedCurrency = captureUnit?.amount?.currency_code || 'USD';
+      const capturedCurrency = captureUnit?.amount?.currency_code;
       const expectedCurrency = order.currency || 'USD';
 
-      // 1. Currency verification
-      if (capturedCurrency !== expectedCurrency) {
+      // 1. Currency verification (fails closed if currency is missing or mismatched)
+      if (!capturedCurrency || capturedCurrency !== expectedCurrency) {
+        const reason = !capturedCurrency
+          ? 'Missing currency code in PayPal capture response.'
+          : `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+
         const releaseCurrencyOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
             freshOrders[idx].captureId = captureId;
             freshOrders[idx].capturedAmount = capturedAmountStr;
-            freshOrders[idx].capturedCurrency = capturedCurrency;
-            freshOrders[idx].reconciliationReason = `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+            freshOrders[idx].capturedCurrency = capturedCurrency || 'UNKNOWN';
+            freshOrders[idx].reconciliationReason = reason;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseCurrencyOrders();
         }
 
         const error = new Error(
-          `Critical currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}. Locked for manual reconciliation.`
+          `Critical currency mismatch: ${reason} Locked for manual reconciliation.`
         );
         error.statusCode = 422;
         throw error;
@@ -423,7 +436,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       if (capturedCents !== expectedCents) {
         const releaseMismatchOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
@@ -432,7 +445,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
             freshOrders[idx].capturedCurrency = capturedCurrency;
             freshOrders[idx].reconciliationReason = `Amount mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseMismatchOrders();
@@ -458,18 +471,18 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
 
     try {
       // Update order state to CAPTURED
-      const freshOrders = await readJsonFile(ORDERS_FILE, []);
+      const freshOrders = await readJsonFile(getOrdersFilePath(), []);
       const idx = freshOrders.findIndex(o => o.orderId === orderId);
       if (idx !== -1) {
         freshOrders[idx].status = 'CAPTURED';
         freshOrders[idx].capturedAt = new Date().toISOString();
         freshOrders[idx].captureId = captureId;
         delete freshOrders[idx].reconciliationReason;
-        await writeJsonFile(ORDERS_FILE, freshOrders);
+        await writeJsonFile(getOrdersFilePath(), freshOrders);
       }
 
       // Idempotent ledger write
-      const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+      const transactions = await readJsonFile(getTransactionsFilePath(), []);
       const existingTxn = transactions.find(t => 
         t.paypalOrderId === order.orderId || 
         (captureId && t.paypalCaptureId === captureId)
@@ -506,7 +519,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
         };
 
         transactions.unshift(newTransaction);
-        await writeJsonFile(TRANSACTIONS_FILE, transactions);
+        await writeJsonFile(getTransactionsFilePath(), transactions);
       }
     } finally {
       releaseLedgerLock();
@@ -535,8 +548,8 @@ export async function reconcileLedgerAndOrders() {
   const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
   const releaseLedger = await fileMutex.acquire(LEDGER_LOCK_KEY);
   try {
-    const orders = await readJsonFile(ORDERS_FILE, []);
-    const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+    const orders = await readJsonFile(getOrdersFilePath(), []);
+    const transactions = await readJsonFile(getTransactionsFilePath(), []);
     let modifiedTransactions = false;
     let reconciledCount = 0;
 
@@ -578,7 +591,7 @@ export async function reconcileLedgerAndOrders() {
     }
 
     if (modifiedTransactions) {
-      await writeJsonFile(TRANSACTIONS_FILE, transactions);
+      await writeJsonFile(getTransactionsFilePath(), transactions);
     }
 
     // 2. Clear stuck CAPTURING orders from previous process crashes
@@ -593,7 +606,7 @@ export async function reconcileLedgerAndOrders() {
     }
 
     if (modifiedOrders) {
-      await writeJsonFile(ORDERS_FILE, orders);
+      await writeJsonFile(getOrdersFilePath(), orders);
     }
 
     return {
@@ -626,7 +639,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
     // Read order under orders lock
     const releaseReadOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
     try {
-      const orders = await readJsonFile(ORDERS_FILE, []);
+      const orders = await readJsonFile(getOrdersFilePath(), []);
       const orderIndex = orders.findIndex(o => o.orderId === orderId);
 
       if (orderIndex === -1) {
@@ -657,42 +670,53 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
     if (paypalOrder.status === 'COMPLETED') {
       const capture = paypalOrder.purchase_units?.[0]?.payments?.captures?.[0];
 
-      if (!capture) {
+      // Independent capture status check: capture record must exist AND have status === 'COMPLETED'
+      if (!capture || capture.status !== 'COMPLETED') {
+        const nonCompletedReason = !capture
+          ? 'PayPal order marked COMPLETED but no capture record found in purchase_units.'
+          : `PayPal capture status is "${capture.status}" (expected "COMPLETED"). Settlement unverified.`;
+
         const releaseMissing = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
-            freshOrders[idx].reconciliationReason = 'PayPal order marked COMPLETED but no capture record found in purchase_units.';
+            if (capture?.id) freshOrders[idx].captureId = capture.id;
+            if (capture?.amount?.value) freshOrders[idx].capturedAmount = capture.amount.value;
+            freshOrders[idx].reconciliationReason = nonCompletedReason;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseMissing();
         }
-        return { success: false, status: 'MANUAL_RECONCILIATION_REQUIRED', reason: 'Missing capture record in PayPal order' };
+        return { success: false, status: 'MANUAL_RECONCILIATION_REQUIRED', reason: nonCompletedReason };
       }
 
       const captureId = capture.id;
       const capturedAmountStr = capture.amount?.value;
-      const capturedCurrency = capture.amount?.currency_code || 'USD';
+      const capturedCurrency = capture.amount?.currency_code;
       const expectedCurrency = order.currency || 'USD';
 
-      // 1. Verify currency match
-      if (capturedCurrency !== expectedCurrency) {
+      // 1. Verify currency match (fail closed if missing or mismatched)
+      if (!capturedCurrency || capturedCurrency !== expectedCurrency) {
+        const reason = !capturedCurrency
+          ? 'Missing currency code in PayPal capture record.'
+          : `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+
         const releaseCurrMismatch = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
             freshOrders[idx].captureId = captureId;
             freshOrders[idx].capturedAmount = capturedAmountStr;
-            freshOrders[idx].capturedCurrency = capturedCurrency;
-            freshOrders[idx].reconciliationReason = `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+            freshOrders[idx].capturedCurrency = capturedCurrency || 'UNKNOWN';
+            freshOrders[idx].reconciliationReason = reason;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseCurrMismatch();
@@ -700,7 +724,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
         return {
           success: false,
           status: 'MANUAL_RECONCILIATION_REQUIRED',
-          reason: `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`
+          reason
         };
       }
 
@@ -711,7 +735,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
       if (capturedCents !== expectedCents) {
         const releaseAmtMismatch = await fileMutex.acquire(ORDERS_LOCK_KEY);
         try {
-          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const freshOrders = await readJsonFile(getOrdersFilePath(), []);
           const idx = freshOrders.findIndex(o => o.orderId === orderId);
           if (idx !== -1) {
             freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
@@ -720,7 +744,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
             freshOrders[idx].capturedCurrency = capturedCurrency;
             freshOrders[idx].reconciliationReason = `Amount mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`;
             freshOrders[idx].updatedAt = new Date().toISOString();
-            await writeJsonFile(ORDERS_FILE, freshOrders);
+            await writeJsonFile(getOrdersFilePath(), freshOrders);
           }
         } finally {
           releaseAmtMismatch();
@@ -736,7 +760,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
       const releaseSuccessOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
       const releaseLedger = await fileMutex.acquire(LEDGER_LOCK_KEY);
       try {
-        const freshOrders = await readJsonFile(ORDERS_FILE, []);
+        const freshOrders = await readJsonFile(getOrdersFilePath(), []);
         const idx = freshOrders.findIndex(o => o.orderId === orderId);
         if (idx !== -1) {
           freshOrders[idx].status = 'CAPTURED';
@@ -745,11 +769,11 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
           freshOrders[idx].capturedCurrency = capturedCurrency;
           freshOrders[idx].capturedAt = capture.create_time || new Date().toISOString();
           delete freshOrders[idx].reconciliationReason;
-          await writeJsonFile(ORDERS_FILE, freshOrders);
+          await writeJsonFile(getOrdersFilePath(), freshOrders);
         }
 
         // Idempotent ledger write
-        const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+        const transactions = await readJsonFile(getTransactionsFilePath(), []);
         const existingTxn = transactions.find(t => 
           t.paypalOrderId === order.orderId || 
           (captureId && t.paypalCaptureId === captureId)
@@ -777,7 +801,7 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
             notes: `Settled and verified via PayPal Orders reconciliation (Capture ID: ${captureId})`
           };
           transactions.unshift(newTransaction);
-          await writeJsonFile(TRANSACTIONS_FILE, transactions);
+          await writeJsonFile(getTransactionsFilePath(), transactions);
         }
       } finally {
         releaseLedger();
@@ -788,12 +812,12 @@ export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = nu
     } else if (paypalOrder.status === 'APPROVED' || paypalOrder.status === 'CREATED') {
       const releaseRevertOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
       try {
-        const freshOrders = await readJsonFile(ORDERS_FILE, []);
+        const freshOrders = await readJsonFile(getOrdersFilePath(), []);
         const idx = freshOrders.findIndex(o => o.orderId === orderId);
         if (idx !== -1) {
           freshOrders[idx].status = 'CREATED';
           delete freshOrders[idx].reconciliationReason;
-          await writeJsonFile(ORDERS_FILE, freshOrders);
+          await writeJsonFile(getOrdersFilePath(), freshOrders);
         }
       } finally {
         releaseRevertOrders();

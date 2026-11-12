@@ -3,17 +3,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { readJsonFile, writeJsonFile } from '../utils/storage.js';
 import { toCents, fromCents, isStrictPositiveInteger } from '../utils/calculations.js';
-import { createOrder, captureOrder } from '../services/paypalService.js';
+import { createOrder, captureOrder, getTransactionsFilePath } from '../services/paypalService.js';
 
 const router = express.Router();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const TRANSACTIONS_FILE = path.join(__dirname, '../data/transactions.json');
 
 // GET /api/ledger/transactions - List all ledger records
 router.get('/transactions', async (req, res) => {
   try {
-    const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+    const transactions = await readJsonFile(getTransactionsFilePath(), []);
     // Sort newest first
     transactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     res.json({
@@ -29,7 +26,7 @@ router.get('/transactions', async (req, res) => {
 // GET /api/ledger/stats - Aggregated financial metrics
 router.get('/stats', async (req, res) => {
   try {
-    const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+    const transactions = await readJsonFile(getTransactionsFilePath(), []);
     
     let sandboxSpendCents = 0;
     let simulationSpendCents = 0;

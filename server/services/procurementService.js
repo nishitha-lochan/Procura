@@ -19,7 +19,7 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const SUPPLIERS_FILE = path.join(__dirname, '../data/suppliers.json');
+const getSuppliersFile = () => process.env.SUPPLIERS_FILE_PATH || path.join(__dirname, '../data/suppliers.json');
 
 /**
  * Loads demo supplier catalog with intelligent category resolution.
@@ -27,7 +27,7 @@ const SUPPLIERS_FILE = path.join(__dirname, '../data/suppliers.json');
  * returns an empty array to prevent irrelevant category recommendations.
  */
 export async function getQuotes(category = 'chairs') {
-  const suppliers = await readJsonFile(SUPPLIERS_FILE, []);
+  const suppliers = await readJsonFile(getSuppliersFile(), []);
   if (!category || category === 'all') {
     return suppliers;
   }

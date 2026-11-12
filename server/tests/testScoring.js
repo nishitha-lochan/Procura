@@ -1,5 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import os from 'os';
 import {
   toCents,
   fromCents,
@@ -21,15 +23,35 @@ import {
   createOrder,
   captureOrder,
   reconcileLedgerAndOrders,
-  reconcileOrderWithPayPal
+  reconcileOrderWithPayPal,
+  getOrdersFilePath,
+  getTransactionsFilePath,
+  getSuppliersFilePath
 } from '../services/paypalService.js';
 import { buildAuthoritativeRecommendationNarrative } from '../services/geminiService.js';
 import { readJsonFile, writeJsonFile } from '../utils/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ORDERS_FILE = path.join(__dirname, '../data/orders.json');
-const TRANSACTIONS_FILE = path.join(__dirname, '../data/transactions.json');
+
+// Create isolated temporary test directory to prevent tests from modifying real runtime data
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'procura-test-fixtures-'));
+const tempSuppliers = path.join(tempDir, 'suppliers.json');
+const tempOrders = path.join(tempDir, 'orders.json');
+const tempTransactions = path.join(tempDir, 'transactions.json');
+
+// Copy baseline data into isolated test fixtures
+fs.copyFileSync(path.join(__dirname, '../data/suppliers.json'), tempSuppliers);
+fs.copyFileSync(path.join(__dirname, '../data/orders.json'), tempOrders);
+fs.copyFileSync(path.join(__dirname, '../data/transactions.json'), tempTransactions);
+
+process.env.SUPPLIERS_FILE_PATH = tempSuppliers;
+process.env.ORDERS_FILE_PATH = tempOrders;
+process.env.TRANSACTIONS_FILE_PATH = tempTransactions;
+
+const ORDERS_FILE = tempOrders;
+const TRANSACTIONS_FILE = tempTransactions;
+const SUPPLIERS_FILE = tempSuppliers;
 
 console.log('================================================================');
 console.log('     PROCURA — COMPREHENSIVE PRODUCTION TEST SUITE             ');
@@ -49,6 +71,7 @@ function assert(condition, message) {
 }
 
 async function runTests() {
+  try {
   // -------------------------------------------------------------------------
   // 1. FINANCIAL PRECISION & INTEGER CENTS CONVERSION
   // -------------------------------------------------------------------------
@@ -362,7 +385,79 @@ async function runTests() {
   assert(currResult.success === false, 'Reconciliation rejects currency mismatch (EUR vs USD)');
   assert(currResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Currency mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED');
 
-  // Test 7d & 7e: Reconciliation idempotency and single ledger record
+  // Test 7d: Missing currency code fails closed (rejects missing currency)
+  const noCurrOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders4 = await readJsonFile(ORDERS_FILE, []);
+  const noCurrIdx = allOrders4.findIndex(o => o.orderId === noCurrOrder.orderID);
+  allOrders4[noCurrIdx].mode = 'SANDBOX';
+  allOrders4[noCurrIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders4);
+
+  const mockMissingCurrency = {
+    id: noCurrOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {
+        captures: [{
+          id: `CAP-NOCURR-${Date.now()}`,
+          status: 'COMPLETED',
+          amount: { value: '670.00' } // Missing currency_code
+        }]
+      }
+    }]
+  };
+
+  const noCurrResult = await reconcileOrderWithPayPal(noCurrOrder.orderID, mockMissingCurrency);
+  assert(noCurrResult.success === false, 'Reconciliation rejects missing currency code');
+  assert(noCurrResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Missing currency code transitions order to MANUAL_RECONCILIATION_REQUIRED');
+
+  // Test 7e: Non-COMPLETED capture status in reconciliation fails closed
+  const pendOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders5 = await readJsonFile(ORDERS_FILE, []);
+  const pendIdx = allOrders5.findIndex(o => o.orderId === pendOrder.orderID);
+  allOrders5[pendIdx].mode = 'SANDBOX';
+  allOrders5[pendIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders5);
+
+  const mockPendingCapture = {
+    id: pendOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {
+        captures: [{
+          id: `CAP-PEND-${Date.now()}`,
+          status: 'PENDING', // Non-completed capture inside completed order!
+          amount: { value: '670.00', currency_code: 'USD' }
+        }]
+      }
+    }]
+  };
+
+  const pendResult = await reconcileOrderWithPayPal(pendOrder.orderID, mockPendingCapture);
+  assert(pendResult.success === false, 'Reconciliation rejects non-COMPLETED capture status (PENDING)');
+  assert(pendResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'PENDING capture status transitions order to MANUAL_RECONCILIATION_REQUIRED');
+
+  // Test 7f: Completed PayPal order with missing captures array fails closed
+  const noCapOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders6 = await readJsonFile(ORDERS_FILE, []);
+  const noCapIdx = allOrders6.findIndex(o => o.orderId === noCapOrder.orderID);
+  allOrders6[noCapIdx].mode = 'SANDBOX';
+  allOrders6[noCapIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders6);
+
+  const mockNoCaptures = {
+    id: noCapOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {} // No captures unit
+    }]
+  };
+
+  const noCapResult = await reconcileOrderWithPayPal(noCapOrder.orderID, mockNoCaptures);
+  assert(noCapResult.success === false, 'Reconciliation rejects completed PayPal order with missing capture units');
+  assert(noCapResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Missing capture record transitions order to MANUAL_RECONCILIATION_REQUIRED');
+
+  // Test 7g & 7h: Reconciliation idempotency and single ledger record
   const secondRecResult = await reconcileOrderWithPayPal(recOrder.orderID, mockValidPayPal);
   assert(secondRecResult.status === 'CAPTURED', 'Second reconciliation confirms CAPTURED status');
 
@@ -474,12 +569,38 @@ async function runTests() {
   assert(narrative.includes('89.6/100'), 'Narrative enforces exact backend composite score (89.6/100)');
   assert(narrative.includes('Apex Office Solutions'), 'Narrative enforces authoritative supplier name');
 
+  // -------------------------------------------------------------------------
+  // 10. STORAGE INTEGRITY & CORRUPTED JSON PROTECTION
+  // -------------------------------------------------------------------------
+  console.log('\n--- 10. Data Persistence & Corrupted File Protection ---');
+  const corruptFile = path.join(tempDir, 'corrupt_test.json');
+  fs.writeFileSync(corruptFile, '{ "invalidJson": [ unquoted_value, }');
+  let threwCorrupt = false;
+  try {
+    await readJsonFile(corruptFile, []);
+  } catch (err) {
+    threwCorrupt = err.code === 'CORRUPTED_JSON_FILE';
+  }
+  assert(threwCorrupt === true, 'readJsonFile throws CORRUPTED_JSON_FILE on malformed JSON to prevent silent data loss');
+
+  // Non-existent file safely returns default value (ENOENT)
+  const missingFile = path.join(tempDir, 'does_not_exist.json');
+  const defaultVal = await readJsonFile(missingFile, [{ default: true }]);
+  assert(defaultVal.length === 1 && defaultVal[0].default === true, 'readJsonFile returns defaultValue safely for non-existent file (ENOENT)');
+
   console.log('\n================================================================');
   console.log(`     TEST EXECUTION COMPLETE: ${passed} PASSED, ${failed} FAILED`);
   console.log('================================================================\n');
 
   if (failed > 0) {
     process.exit(1);
+  }
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (e) {
+      console.warn('Temporary test fixture cleanup notice:', e.message);
+    }
   }
 }
 

@@ -543,7 +543,9 @@ npm test
 ```
 *(Or navigate to `server/` and run `node tests/testScoring.js`).*
 
-### Test Coverage Summary (113 Executed Passing Assertions Across 9 Verification Domains):
+### Test Coverage Summary (121 Executed Passing Assertions Across 10 Verification Domains):
+All automated tests execute against an isolated temporary test fixture directory created and torn down in `testScoring.js`, guaranteeing zero test artifact leakage into production data files (`server/data/orders.json` and `server/data/transactions.json`).
+
 - **1. Financial Precision & Integer Cents (18 tests)**: Asserts that `toCents()` eliminates floating-point currency drift (`0.1 + 0.2 === 0.3`), tests string parsing, null/NaN sanitization, landed cost calculation, and budget-relative savings. Validates strict positive integer parsing (accepts `10`, `"25"`; rejects decimals `2.5`, `"2.5"`, malformed strings `"10abc"`, zero, negatives, and NaN).
 - **2. 5-Dimensional Scoring Engine (25 tests)**:
   - *Landed Cost (35%)*: Range-normalized score bounds (cheapest = 100, most expensive = 0, midpoint = 50, identical prices = 100).
@@ -556,9 +558,10 @@ npm test
 - **4. Requirement Extraction & Heuristics (7 tests)**: Verifies that delivery days ("5 days") are never mistaken for order quantity and product model numbers ("5540") are never mistaken for budget or quantity.
 - **5. Server-Side Order Validation (9 tests)**: Validates that `createOrder` enforces positive integer quantities (rejecting negatives, decimals `2.5`, and strings `"10abc"` with HTTP 400), rejects non-existent suppliers (404), rejects orders exceeding available inventory (400), and rejects orders exceeding budget caps (400).
 - **6. Order State Machine & Double-Capture Protection (4 tests)**: Verifies `CREATED` -> `CAPTURING` -> `CAPTURED` lifecycle, validates successful simulation capture with integer cents, rejects invalid order IDs (404), and strictly blocks double capture attempts with HTTP 409 Conflict.
-- **7. PayPal Capture Reconciliation & Mismatch Defense (11 tests)**: Tests that PayPal `COMPLETED` capture amounts and currencies are verified against stored authoritative values; rejects capture amount mismatches and currency mismatches by transitioning to `MANUAL_RECONCILIATION_REQUIRED`; asserts that no falsified ledger entry is created on mismatch; and verifies that reconciliation creates exactly 1 idempotent ledger row.
+- **7. PayPal Capture Reconciliation & Mismatch Defense (17 tests)**: Tests that PayPal `COMPLETED` capture amounts and currencies are verified against stored authoritative values; rejects capture amount mismatches, currency mismatches, missing currency codes, and non-`COMPLETED` capture statuses (e.g. `PENDING`) by transitioning to `MANUAL_RECONCILIATION_REQUIRED`; asserts that no falsified ledger entry is created on mismatch; and verifies that reconciliation creates exactly 1 idempotent ledger row.
 - **8. Concurrent Order Creation & Parallel Capture Safety (17 tests)**: Concurrently creates 5 distinct orders under `orders-file-lock` to verify that no order record is overwritten; executes 3 concurrent captures in parallel under `order-lock-${orderId}` and `transactions-ledger-lock` to assert that all 3 orders transition to `CAPTURED` and commit distinct ledger transactions.
 - **9. Ledger Failure Recovery & Gemini Financial Narrative (11 tests)**: Simulates a crash between order write and ledger write, asserting that `reconcileLedgerAndOrders()` automatically recovers missing ledger transactions; verifies that `buildAuthoritativeRecommendationNarrative()` strictly enforces deterministic landed cost, budget, savings, and scores, while cleansing any hallucinated dollar amounts from LLM text.
+- **10. Storage Integrity & Corrupted File Protection (2 tests)**: Validates that `readJsonFile()` throws a critical `CORRUPTED_JSON_FILE` exception upon encountering malformed JSON syntax rather than silently wiping data or returning default values, while preserving safe fallback for legitimate missing files (`ENOENT`).
 
 Verified test output:
 ```text
@@ -668,6 +671,12 @@ Verified test output:
 ✅ PASS: No falsified ledger transaction is created for mismatched order
 ✅ PASS: Reconciliation rejects currency mismatch (EUR vs USD)
 ✅ PASS: Currency mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Reconciliation rejects missing currency code
+✅ PASS: Missing currency code transitions order to MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Reconciliation rejects non-COMPLETED capture status (PENDING)
+✅ PASS: PENDING capture status transitions order to MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Reconciliation rejects completed PayPal order with missing capture units
+✅ PASS: Missing capture record transitions order to MANUAL_RECONCILIATION_REQUIRED
 ✅ PASS: Second reconciliation confirms CAPTURED status
 ✅ PASS: Reconciliation idempotently creates exactly 1 ledger transaction (found 1)
 
@@ -697,8 +706,12 @@ Verified test output:
 ✅ PASS: Narrative enforces exact backend composite score (89.6/100)
 ✅ PASS: Narrative enforces authoritative supplier name
 
+--- 10. Data Persistence & Corrupted File Protection ---
+✅ PASS: readJsonFile throws CORRUPTED_JSON_FILE on malformed JSON to prevent silent data loss
+✅ PASS: readJsonFile returns defaultValue safely for non-existent file (ENOENT)
+
 ================================================================
-     TEST EXECUTION COMPLETE: 113 PASSED, 0 FAILED
+     TEST EXECUTION COMPLETE: 121 PASSED, 0 FAILED
 ================================================================
 ```
 

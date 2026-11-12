@@ -28,7 +28,9 @@ class FileMutex {
 export const fileMutex = new FileMutex();
 
 /**
- * Safely reads a JSON file, returning defaultValue if the file does not exist or has invalid JSON.
+ * Safely reads a JSON file.
+ * Returns defaultValue only when the file does not exist (ENOENT).
+ * Fails visibly on JSON syntax corruption or read errors to prevent silent data loss.
  */
 export async function readJsonFile(filePath, defaultValue = []) {
   try {
@@ -38,8 +40,14 @@ export async function readJsonFile(filePath, defaultValue = []) {
     if (error.code === 'ENOENT') {
       return defaultValue;
     }
+    if (error instanceof SyntaxError) {
+      const corruptErr = new Error(`Critical JSON integrity error: Corrupted or malformed file at ${filePath}. Parse failed: ${error.message}`);
+      corruptErr.code = 'CORRUPTED_JSON_FILE';
+      console.error(`[STORAGE INTEGRITY ERROR] ${corruptErr.message}`);
+      throw corruptErr;
+    }
     console.error(`Error reading ${filePath}:`, error.message);
-    return defaultValue;
+    throw error;
   }
 }
 
