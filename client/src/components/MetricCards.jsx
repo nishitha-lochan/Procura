@@ -35,6 +35,7 @@ export default function MetricCards({
   stats,
   transactions = [],
   currentEstimatedSavings = 0,
+  activeQuoteName = null,
   isLoading = false
 }) {
   const sandbox = stats?.sandbox || { totalSpend: 0, realizedSavings: 0, completedPayments: 0 };
@@ -49,34 +50,30 @@ export default function MetricCards({
   // 1. Process Spend by Category for Hollow Donut Chart
   const categoryData = React.useMemo(() => {
     if (!transactions || transactions.length === 0) {
-      return [
-        { name: 'Ergonomic Task Chairs', value: 4450 },
-        { name: 'Standard Swivel Chairs', value: 1485 },
-        { name: 'Logistics & Freight', value: 1150 }
-      ];
+      return [];
     }
 
     const catMap = {};
     transactions.forEach((txn) => {
       // Group by product or generic category
       const product = txn.product || 'Office Hardware';
-      const catName = product.includes('Mesh')
+      const catName = product.includes('Mesh') || product.includes('Chair') || product.includes('Seating')
         ? 'Ergonomic Seating'
-        : product.includes('Swivel')
-        ? 'Standard Task Chairs'
-        : product.includes('Executive')
-        ? 'Executive Seating'
+        : product.includes('Laptop') || product.includes('ThinkPad') || product.includes('Computer')
+        ? 'Laptops & Devices'
+        : product.includes('Webcam') || product.includes('Camera') || product.includes('Sound')
+        ? 'Audio & Video'
+        : product.includes('Desk') || product.includes('Table')
+        ? 'Workstations & Desks'
         : 'Workplace Equipment';
 
       catMap[catName] = (catMap[catName] || 0) + (parseFloat(txn.totalAmount) || 0);
     });
 
-    const items = Object.entries(catMap).map(([name, value]) => ({
+    return Object.entries(catMap).map(([name, value]) => ({
       name,
       value: Math.round(value * 100) / 100
     }));
-
-    return items.length > 0 ? items : [{ name: 'Commercial Equipment', value: 4450 }];
   }, [transactions]);
 
   const totalCategorySpend = React.useMemo(() => {
@@ -86,12 +83,7 @@ export default function MetricCards({
   // 2. Process Purchasing Volume Over Time for Area Chart
   const timelineData = React.useMemo(() => {
     if (!transactions || transactions.length === 0) {
-      return [
-        { date: 'Oct 28', spend: 1200, count: 1 },
-        { date: 'Nov 01', spend: 2300, count: 1 },
-        { date: 'Nov 04', spend: 1485, count: 1 },
-        { date: 'Nov 10', spend: 4450, count: 1 }
-      ];
+      return [];
     }
 
     // Sort chronologically
@@ -99,14 +91,12 @@ export default function MetricCards({
       (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
     );
 
-    // Group by formatted date
     const dateMap = {};
     sorted.forEach((txn) => {
       const d = new Date(txn.timestamp);
-      const dateStr = isNaN(d.getTime())
-        ? 'Recent'
-        : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-
+      const dateStr = !isNaN(d.getTime())
+        ? d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+        : 'Recent';
       if (!dateMap[dateStr]) {
         dateMap[dateStr] = { date: dateStr, spend: 0, count: 0 };
       }
@@ -182,13 +172,36 @@ export default function MetricCards({
             </div>
           </div>
           <div className="kpi-value blue">
-            ${currentEstimatedSavings.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {currentEstimatedSavings > 0
+              ? `+$${currentEstimatedSavings.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : '$0.00'}
           </div>
-          <div className="kpi-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <span className="badge badge-sim" style={{ padding: '1px 6px', fontSize: '10px' }}>
-              AI ESTIMATE
-            </span>
-            <span>Identified in active quote</span>
+          <div className="kpi-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            {currentEstimatedSavings > 0 ? (
+              <>
+                <span className="badge badge-sim" style={{ padding: '1px 6px', fontSize: '10px' }}>
+                  AI ESTIMATE
+                </span>
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    maxWidth: '170px'
+                  }}
+                  title={activeQuoteName || 'Active quote'}
+                >
+                  {activeQuoteName ? `${activeQuoteName}` : 'Identified in active quote'}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="badge badge-sample" style={{ padding: '1px 6px', fontSize: '10px' }}>
+                  IDLE
+                </span>
+                <span>Awaiting active quote evaluation</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -244,49 +257,65 @@ export default function MetricCards({
             </span>
           </div>
 
-          <div className="chart-body">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={categoryData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={62}
-                  outerRadius={88}
-                  paddingAngle={4}
-                  dataKey="value"
-                >
-                  {categoryData.map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]}
-                      stroke="#1E293B"
-                      strokeWidth={2}
-                    />
-                  ))}
-                </Pie>
-                <RechartsTooltip content={<CustomDonutTooltip total={totalCategorySpend} />} />
-              </PieChart>
-            </ResponsiveContainer>
+          <div className="chart-body" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+            {categoryData.length > 0 ? (
+              <>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={categoryData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={62}
+                      outerRadius={88}
+                      paddingAngle={4}
+                      dataKey="value"
+                    >
+                      {categoryData.map((entry, index) => (
+                        <Cell
+                          key={`cell-${index}`}
+                          fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]}
+                          stroke="#1E293B"
+                          strokeWidth={2}
+                        />
+                      ))}
+                    </Pie>
+                    <RechartsTooltip content={<CustomDonutTooltip total={totalCategorySpend} />} />
+                  </PieChart>
+                </ResponsiveContainer>
 
-            {/* Centered Total Label inside Hollow Donut */}
-            <div
-              style={{
-                position: 'absolute',
-                top: '50%',
-                left: '50%',
-                transform: 'translate(-50%, -50%)',
-                textAlign: 'center',
-                pointerEvents: 'none'
-              }}
-            >
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
-                Volume
+                {/* Centered Total Label inside Hollow Donut */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    textAlign: 'center',
+                    pointerEvents: 'none'
+                  }}
+                >
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
+                    Volume
+                  </div>
+                  <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                    ${(totalCategorySpend / 1000).toFixed(1)}k
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '24px 16px', color: 'var(--text-muted)' }}>
+                <div style={{ width: '56px', height: '56px', borderRadius: '50%', border: '2px dashed #334155', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', color: 'var(--text-muted)' }}>
+                  <PieIcon size={24} />
+                </div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  No Active Settlements
+                </div>
+                <div style={{ fontSize: '11.5px', maxWidth: '240px', margin: '0 auto' }}>
+                  Category distribution updates live as purchase orders are settled.
+                </div>
               </div>
-              <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
-                ${(totalCategorySpend / 1000).toFixed(1)}k
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Legend Grid */}
@@ -297,28 +326,36 @@ export default function MetricCards({
               gap: '12px 18px',
               marginTop: '12px',
               paddingTop: '12px',
-              borderTop: '1px solid var(--border-primary)'
+              borderTop: '1px solid var(--border-primary)',
+              minHeight: '28px',
+              alignItems: 'center'
             }}
           >
-            {categoryData.map((item, index) => {
-              const pct = totalCategorySpend > 0 ? Math.round((item.value / totalCategorySpend) * 100) : 0;
-              return (
-                <div key={item.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
-                  <span
-                    style={{
-                      width: '10px',
-                      height: '10px',
-                      borderRadius: '50%',
-                      backgroundColor: CATEGORY_COLORS[index % CATEGORY_COLORS.length]
-                    }}
-                  ></span>
-                  <span style={{ color: 'var(--text-secondary)' }}>{item.name}</span>
-                  <span style={{ color: 'var(--text-muted)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
-                    {pct}%
-                  </span>
-                </div>
-              );
-            })}
+            {categoryData.length > 0 ? (
+              categoryData.map((item, index) => {
+                const pct = totalCategorySpend > 0 ? Math.round((item.value / totalCategorySpend) * 100) : 0;
+                return (
+                  <div key={item.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
+                    <span
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '50%',
+                        backgroundColor: CATEGORY_COLORS[index % CATEGORY_COLORS.length]
+                      }}
+                    ></span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{item.name}</span>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
+                      {pct}%
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <span style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                Awaiting order settlement data
+              </span>
+            )}
           </div>
         </div>
 
@@ -339,43 +376,57 @@ export default function MetricCards({
             </span>
           </div>
 
-          <div className="chart-body">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timelineData} margin={{ top: 12, right: 16, left: -10, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="spendGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#F97316" stopOpacity={0.0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.4} vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  stroke="#94A3B8"
-                  fontSize={11.5}
-                  tickLine={false}
-                  axisLine={{ stroke: '#334155' }}
-                />
-                <YAxis
-                  stroke="#94A3B8"
-                  fontSize={11.5}
-                  tickLine={false}
-                  axisLine={{ stroke: '#334155' }}
-                  tickFormatter={(val) => `$${val >= 1000 ? (val / 1000).toFixed(1) + 'k' : val}`}
-                />
-                <RechartsTooltip content={<CustomAreaTooltip />} />
-                <Area
-                  type="monotone"
-                  dataKey="spend"
-                  stroke="#3B82F6"
-                  strokeWidth={2.5}
-                  fillOpacity={1}
-                  fill="url(#spendGradient)"
-                  dot={{ r: 4, fill: '#F97316', stroke: '#1E293B', strokeWidth: 2 }}
-                  activeDot={{ r: 6, fill: '#F97316', stroke: '#FFFFFF', strokeWidth: 2 }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+          <div className="chart-body" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+            {timelineData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={timelineData} margin={{ top: 12, right: 16, left: -10, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="spendGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#F97316" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.4} vertical={false} />
+                  <XAxis
+                    dataKey="date"
+                    stroke="#94A3B8"
+                    fontSize={11.5}
+                    tickLine={false}
+                    axisLine={{ stroke: '#334155' }}
+                  />
+                  <YAxis
+                    stroke="#94A3B8"
+                    fontSize={11.5}
+                    tickLine={false}
+                    axisLine={{ stroke: '#334155' }}
+                    tickFormatter={(val) => `$${val >= 1000 ? (val / 1000).toFixed(1) + 'k' : val}`}
+                  />
+                  <RechartsTooltip content={<CustomAreaTooltip />} />
+                  <Area
+                    type="monotone"
+                    dataKey="spend"
+                    stroke="#3B82F6"
+                    strokeWidth={2.5}
+                    fillOpacity={1}
+                    fill="url(#spendGradient)"
+                    dot={{ r: 4, fill: '#F97316', stroke: '#1E293B', strokeWidth: 2 }}
+                    activeDot={{ r: 6, fill: '#F97316', stroke: '#FFFFFF', strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '24px 16px', color: 'var(--text-muted)' }}>
+                <div style={{ width: '56px', height: '56px', borderRadius: '50%', border: '2px dashed #334155', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', color: 'var(--text-muted)' }}>
+                  <TrendingUp size={24} />
+                </div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  No Purchasing Volume Recorded
+                </div>
+                <div style={{ fontSize: '11.5px', maxWidth: '260px', margin: '0 auto' }}>
+                  Spend trajectory plots automatically as purchase orders settle.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Subtitle / Insight Note */}
@@ -391,8 +442,10 @@ export default function MetricCards({
               color: 'var(--text-muted)'
             }}
           >
-            <span>Peak settlement: <strong>${Math.max(...timelineData.map(d => d.spend), 0).toLocaleString()}</strong></span>
-            <span style={{ color: 'var(--accent-mint)' }}>Consistent 0% Settlement Variance</span>
+            <span>Peak settlement: <strong>${(timelineData.length > 0 ? Math.max(...timelineData.map(d => d.spend), 0) : 0).toLocaleString()}</strong></span>
+            <span style={{ color: timelineData.length > 0 ? 'var(--accent-mint)' : 'var(--text-muted)' }}>
+              {timelineData.length > 0 ? 'Consistent 0% Settlement Variance' : 'Awaiting Settlements'}
+            </span>
           </div>
         </div>
       </div>

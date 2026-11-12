@@ -17,32 +17,24 @@ const __dirname = path.dirname(__filename);
 const SEED_DIR = path.join(__dirname, '../data/seed');
 
 export function getOrdersFilePath() {
-  if (process.env.ORDERS_FILE_PATH) {
-    return process.env.ORDERS_FILE_PATH;
-  }
-  const ordersPath = path.join(__dirname, '../data/orders.json');
-  const seedOrdersPath = path.join(SEED_DIR, 'sample_orders.json');
-  if (!fs.existsSync(ordersPath) && fs.existsSync(seedOrdersPath)) {
+  const ordersPath = process.env.ORDERS_FILE_PATH || path.join(__dirname, '../data/orders.json');
+  if (!fs.existsSync(ordersPath)) {
     try {
-      fs.copyFileSync(seedOrdersPath, ordersPath);
+      fs.writeFileSync(ordersPath, '[]', 'utf-8');
     } catch (e) {
-      console.warn('[Storage Notice] Could not bootstrap orders.json from seed:', e.message);
+      console.warn('[Storage Notice] Could not initialize empty orders.json:', e.message);
     }
   }
   return ordersPath;
 }
 
 export function getTransactionsFilePath() {
-  if (process.env.TRANSACTIONS_FILE_PATH) {
-    return process.env.TRANSACTIONS_FILE_PATH;
-  }
-  const txnsPath = path.join(__dirname, '../data/transactions.json');
-  const seedTxnsPath = path.join(SEED_DIR, 'sample_transactions.json');
-  if (!fs.existsSync(txnsPath) && fs.existsSync(seedTxnsPath)) {
+  const txnsPath = process.env.TRANSACTIONS_FILE_PATH || path.join(__dirname, '../data/transactions.json');
+  if (!fs.existsSync(txnsPath)) {
     try {
-      fs.copyFileSync(seedTxnsPath, txnsPath);
+      fs.writeFileSync(txnsPath, '[]', 'utf-8');
     } catch (e) {
-      console.warn('[Storage Notice] Could not bootstrap transactions.json from seed:', e.message);
+      console.warn('[Storage Notice] Could not initialize empty transactions.json:', e.message);
     }
   }
   return txnsPath;

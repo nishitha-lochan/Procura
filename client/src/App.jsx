@@ -17,9 +17,39 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [isAgentLoading, setIsAgentLoading] = useState(false);
-  const [agentResult, setAgentResult] = useState(null);
-  const [selectedSupplier, setSelectedSupplier] = useState(null);
+  const [agentResult, setAgentResult] = useState(() => {
+    try {
+      const saved = localStorage.getItem('procura_active_agent_result');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [selectedSupplier, setSelectedSupplier] = useState(() => {
+    try {
+      const saved = localStorage.getItem('procura_selected_supplier');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
   const [completedTransaction, setCompletedTransaction] = useState(null);
+
+  const saveAgentResult = (res) => {
+    setAgentResult(res);
+    try {
+      if (res) localStorage.setItem('procura_active_agent_result', JSON.stringify(res));
+      else localStorage.removeItem('procura_active_agent_result');
+    } catch (e) {}
+  };
+
+  const saveSelectedSupplier = (sup) => {
+    setSelectedSupplier(sup);
+    try {
+      if (sup) localStorage.setItem('procura_selected_supplier', JSON.stringify(sup));
+      else localStorage.removeItem('procura_selected_supplier');
+    } catch (e) {}
+  };
 
   // Layout UI state
   const [activeSection, setActiveSection] = useState('overview');
@@ -54,7 +84,7 @@ export default function App() {
   // Handle Requisition Submission with Priority
   const handleRequisitionSubmit = async (prompt, priority = 'balanced') => {
     setIsAgentLoading(true);
-    setSelectedSupplier(null);
+    saveSelectedSupplier(null);
     try {
       // Append priority intent if specified
       const augmentedPrompt = priority && priority !== 'balanced'
@@ -62,11 +92,11 @@ export default function App() {
         : prompt;
 
       const result = await api.runProcureAgent(augmentedPrompt);
-      setAgentResult(result);
+      saveAgentResult(result);
 
       // Auto-select top recommended supplier for convenience
       if (result.recommendation?.topQuote) {
-        setSelectedSupplier(result.recommendation.topQuote);
+        saveSelectedSupplier(result.recommendation.topQuote);
       }
 
       // Smooth scroll to comparison matrix
@@ -86,12 +116,14 @@ export default function App() {
   // Handle Successful Settlement
   const handlePaymentSuccess = async (txn) => {
     setCompletedTransaction(txn);
-    setSelectedSupplier(null);
+    saveSelectedSupplier(null); // Close checkout drawer cleanly
+    // Retain agentResult in state and localStorage so the AI evaluation, supplier matrix,
+    // and active estimated savings remain persistent after settlement and across refreshes.
     await loadDashboardData();
   };
 
   const handleSelectSupplierForPayment = (supplier) => {
-    setSelectedSupplier(supplier);
+    saveSelectedSupplier(supplier);
     setActiveSection('payment');
     setTimeout(() => {
       const el = document.getElementById('payment-section');
@@ -107,7 +139,9 @@ export default function App() {
     }, 150);
   };
 
-  const currentEstimatedSavings = agentResult?.recommendation?.estimatedSavings || 0;
+  const activeQuote = selectedSupplier || agentResult?.recommendation?.topQuote;
+  const currentEstimatedSavings = activeQuote?.estimatedSavings ?? agentResult?.recommendation?.estimatedSavings ?? 0;
+  const activeQuoteName = activeQuote?.name || agentResult?.recommendation?.selectedSupplierName || null;
 
   return (
     <div className={`app-layout ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
@@ -153,6 +187,7 @@ export default function App() {
               stats={stats}
               transactions={transactions}
               currentEstimatedSavings={currentEstimatedSavings}
+              activeQuoteName={activeQuoteName}
               isLoading={isDashboardLoading}
             />
           </div>
