@@ -2,7 +2,7 @@ import axios from 'axios';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PAYPAL_CREDENTIALS, isPayPalConfigured, PAYPAL_API_BASE } from '../config/paypal.js';
-import { readJsonFile, writeJsonFile } from '../utils/storage.js';
+import { readJsonFile, writeJsonFile, fileMutex } from '../utils/storage.js';
 import { toCents, fromCents, calculateLandedCost, calculateEstimatedSavings } from '../utils/calculations.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,7 +20,9 @@ let tokenExpiresAt = 0;
  */
 export async function getPayPalAccessToken() {
   if (!isPayPalConfigured) {
-    throw new Error('PayPal Sandbox credentials not configured.');
+    const error = new Error('PayPal Sandbox credentials not configured.');
+    error.statusCode = 503;
+    throw error;
   }
 
   const now = Date.now();
@@ -51,21 +53,55 @@ export async function getPayPalAccessToken() {
 
 /**
  * Creates an authoritative PayPal order on the backend.
- * Calculates exact landed cost from suppliers.json to prevent client-side price tampering.
+ * Validates quantity, stock availability, and budget caps authoritatively against suppliers.json.
  */
 export async function createOrder(supplierId, quantityRequested = 1, maxBudget = 0, forceSimulation = false) {
-  const quantity = Math.max(1, parseInt(quantityRequested, 10) || 1);
-  const suppliers = await readJsonFile(SUPPLIERS_FILE, []);
-  const supplier = suppliers.find(s => s.supplierId === supplierId);
-
-  if (!supplier) {
-    throw new Error(`Supplier with ID "${supplierId}" not found.`);
+  if (!supplierId || typeof supplierId !== 'string') {
+    const error = new Error('supplierId is required and must be a valid string.');
+    error.statusCode = 400;
+    throw error;
   }
 
-  // Calculate authoritative landed cost on backend
+  const parsedQty = parseInt(quantityRequested, 10);
+  if (isNaN(parsedQty) || parsedQty <= 0) {
+    const error = new Error(`Invalid order quantity (${quantityRequested}). Quantity must be a positive integer >= 1.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const quantity = parsedQty;
+
+  const suppliers = await readJsonFile(SUPPLIERS_FILE, []);
+  const supplier = suppliers.find(s => s.supplierId === supplierId.trim());
+
+  if (!supplier) {
+    const error = new Error(`Supplier with ID "${supplierId}" not found in catalog.`);
+    error.statusCode = 404;
+    throw error;
+  }
+
+  // Stock availability validation
+  if (quantity > supplier.availableQuantity) {
+    const error = new Error(
+      `Requested quantity (${quantity}) exceeds supplier stock limit (${supplier.availableQuantity} units available).`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Authoritative server-side landed cost calculation
   const landedCost = calculateLandedCost(supplier.unitPrice, quantity, supplier.shippingCost);
   const landedCostFormatted = landedCost.toFixed(2);
   const budget = parseFloat(maxBudget) || 0;
+
+  // Budget cap enforcement
+  if (budget > 0 && toCents(landedCost) > toCents(budget)) {
+    const error = new Error(
+      `Authoritative landed cost ($${landedCostFormatted}) exceeds specified budget cap ($${budget.toFixed(2)}). Order rejected.`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
   const estimatedSavings = calculateEstimatedSavings(budget, landedCost);
 
   // If PayPal Sandbox credentials are not configured or Simulation is explicitly requested
@@ -110,7 +146,7 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
     purchase_units: [
       {
         custom_id: supplier.supplierId,
-        description: `ProcurePal Settlement: ${supplier.product} (${quantity} units)`,
+        description: `Procura Settlement: ${supplier.product} (${quantity} units)`,
         amount: {
           currency_code: "USD",
           value: landedCostFormatted
@@ -171,130 +207,160 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
 }
 
 /**
- * Captures an approved PayPal order with double-capture protection and cent-level amount verification.
+ * Captures an approved PayPal order with state transition locking (CREATED -> CAPTURING -> CAPTURED),
+ * duplicate-capture protection, and integer-cent amount verification.
  */
 export async function captureOrder(orderId, procurementMetadata = {}) {
-  const orders = await readJsonFile(ORDERS_FILE, []);
-  const orderIndex = orders.findIndex(o => o.orderId === orderId);
-
-  if (orderIndex === -1) {
-    throw new Error(`Order "${orderId}" not found in persistent orders registry.`);
-  }
-
-  const order = orders[orderIndex];
-
-  // Double capture / replay protection
-  if (order.status === 'CAPTURED') {
-    const error = new Error(`Order "${orderId}" has already been captured and settled.`);
-    error.statusCode = 409;
+  if (!orderId || typeof orderId !== 'string') {
+    const error = new Error('orderId is required for payment capture.');
+    error.statusCode = 400;
     throw error;
   }
 
-  let captureId;
-  let paymentMode = order.mode === 'SANDBOX' ? 'SANDBOX_VERIFIED' : 'SIMULATION';
-  let captureStatus = 'COMPLETED';
+  // Use fileMutex to guarantee atomic read-modify-write on order state
+  const release = await fileMutex.acquire(`order-lock-${orderId}`);
 
-  if (order.mode === 'SANDBOX') {
-    const token = await getPayPalAccessToken();
-    let captureResponse;
-    try {
-      captureResponse = await axios.post(
-        `${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}/capture`,
-        {},
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'PayPal-Request-Id': `capture-${orderId}`
-          }
-        }
-      );
-    } catch (axiosErr) {
-      const errDetails = axiosErr.response?.data?.details;
-      const issue = errDetails?.[0]?.issue;
-      if (issue === 'ORDER_NOT_APPROVED') {
-        const error = new Error('Payment was not approved yet. Please log into the PayPal popup and click "Pay Now" or "Complete Purchase".');
-        error.statusCode = 422;
-        throw error;
-      }
-      const desc = errDetails?.[0]?.description || axiosErr.response?.data?.message || axiosErr.message;
-      const error = new Error(`PayPal capture error (${issue || '422'}): ${desc}`);
-      error.statusCode = axiosErr.response?.status || 500;
+  try {
+    const orders = await readJsonFile(ORDERS_FILE, []);
+    const orderIndex = orders.findIndex(o => o.orderId === orderId);
+
+    if (orderIndex === -1) {
+      const error = new Error(`Order "${orderId}" not found in persistent orders registry.`);
+      error.statusCode = 404;
       throw error;
     }
 
-    const captureData = captureResponse.data;
-    captureStatus = captureData.status;
+    const order = orders[orderIndex];
 
-    if (captureStatus !== 'COMPLETED') {
-      throw new Error(`PayPal order capture was not completed. Status returned: ${captureStatus}`);
+    // Double capture & concurrency protection
+    if (order.status === 'CAPTURED') {
+      const error = new Error(`Order "${orderId}" has already been captured and settled.`);
+      error.statusCode = 409;
+      throw error;
     }
 
-    const captureUnit = captureData.purchase_units[0].payments.captures[0];
-    captureId = captureUnit.id;
-    const capturedAmountStr = captureUnit.amount.value;
-
-    // Zero Floating-Point Precision Hazard: verify in exact integer cents
-    const capturedCents = toCents(capturedAmountStr);
-    const expectedCents = toCents(order.amount);
-
-    if (capturedCents !== expectedCents) {
-      throw new Error(
-        `Critical financial mismatch: Server expected $${order.amount} (${expectedCents} cents), ` +
-        `but PayPal captured $${capturedAmountStr} (${capturedCents} cents). Settlement aborted.`
-      );
+    if (order.status === 'CAPTURING') {
+      const error = new Error(`Payment capture for order "${orderId}" is currently in progress. Please wait.`);
+      error.statusCode = 409;
+      throw error;
     }
-  } else {
-    // Simulation Mode
-    captureId = `SIM-CAPTURE-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+
+    // Transition state to CAPTURING to block concurrent requests
+    order.status = 'CAPTURING';
+    orders[orderIndex] = order;
+    await writeJsonFile(ORDERS_FILE, orders);
+
+    let captureId;
+    let paymentMode = order.mode === 'SANDBOX' ? 'SANDBOX_VERIFIED' : 'SIMULATION';
+    let captureStatus = 'COMPLETED';
+
+    if (order.mode === 'SANDBOX') {
+      try {
+        const token = await getPayPalAccessToken();
+        const captureResponse = await axios.post(
+          `${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}/capture`,
+          {},
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              'PayPal-Request-Id': `capture-${orderId}`
+            }
+          }
+        );
+
+        const captureData = captureResponse.data;
+        captureStatus = captureData.status;
+
+        if (captureStatus !== 'COMPLETED') {
+          throw new Error(`PayPal order capture was not completed. Status returned: ${captureStatus}`);
+        }
+
+        const captureUnit = captureData.purchase_units[0].payments.captures[0];
+        captureId = captureUnit.id;
+        const capturedAmountStr = captureUnit.amount.value;
+
+        // Verify in exact integer cents
+        const capturedCents = toCents(capturedAmountStr);
+        const expectedCents = toCents(order.amount);
+
+        if (capturedCents !== expectedCents) {
+          throw new Error(
+            `Critical financial mismatch: Server expected $${order.amount} (${expectedCents} cents), ` +
+            `but PayPal captured $${capturedAmountStr} (${capturedCents} cents). Settlement aborted.`
+          );
+        }
+      } catch (err) {
+        // Revert status to CREATED so the buyer can retry
+        order.status = 'CREATED';
+        orders[orderIndex] = order;
+        await writeJsonFile(ORDERS_FILE, orders);
+
+        const errDetails = err.response?.data?.details;
+        const issue = errDetails?.[0]?.issue;
+        if (issue === 'ORDER_NOT_APPROVED') {
+          const error = new Error('Payment was not approved yet. Please log into the PayPal popup and click "Pay Now" or "Complete Purchase".');
+          error.statusCode = 422;
+          throw error;
+        }
+        const desc = errDetails?.[0]?.description || err.response?.data?.message || err.message;
+        const error = new Error(`PayPal capture error (${issue || '422'}): ${desc}`);
+        error.statusCode = err.statusCode || err.response?.status || 500;
+        throw error;
+      }
+    } else {
+      // Simulation Mode
+      captureId = `SIM-CAPTURE-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    }
+
+    // Update order state to CAPTURED
+    order.status = 'CAPTURED';
+    order.capturedAt = new Date().toISOString();
+    order.captureId = captureId;
+    orders[orderIndex] = order;
+    await writeJsonFile(ORDERS_FILE, orders);
+
+    // Generate verified transaction row in ledger
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const transactionId = paymentMode === 'SANDBOX_VERIFIED' 
+      ? `TXN-2026-${randomSuffix}` 
+      : `SIM-TXN-2026-${randomSuffix}`;
+
+    const newTransaction = {
+      transactionId,
+      paypalOrderId: order.orderId,
+      paypalCaptureId: captureId,
+      timestamp: new Date().toISOString(),
+      supplierId: order.supplierId,
+      supplierName: order.supplierName,
+      product: order.product,
+      quantity: order.quantity,
+      unitPrice: order.unitPrice,
+      shippingCost: order.shippingCost,
+      totalAmount: parseFloat(order.amount),
+      maxBudget: order.maxBudget || procurementMetadata.maxBudget || 0,
+      estimatedSavings: order.estimatedSavings || procurementMetadata.estimatedSavings || calculateEstimatedSavings(order.maxBudget || procurementMetadata.maxBudget, order.amount),
+      realizedSavings: order.estimatedSavings || procurementMetadata.estimatedSavings || calculateEstimatedSavings(order.maxBudget || procurementMetadata.maxBudget, order.amount),
+      paymentStatus: "COMPLETED",
+      paymentMode,
+      notes: paymentMode === 'SANDBOX_VERIFIED'
+        ? `Settled to platform Sandbox Merchant with Supplier metadata (ID: ${order.supplierId})`
+        : `Simulated checkout record (Simulation Mode active)`
+    };
+
+    const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+    transactions.unshift(newTransaction);
+    await writeJsonFile(TRANSACTIONS_FILE, transactions);
+
+    return {
+      success: true,
+      transaction: newTransaction,
+      paymentStatus: "COMPLETED",
+      paymentMode,
+      captureID: captureId,
+      realizedSavings: newTransaction.realizedSavings
+    };
+  } finally {
+    release();
   }
-
-  // Update order state to CAPTURED
-  order.status = 'CAPTURED';
-  order.capturedAt = new Date().toISOString();
-  order.captureId = captureId;
-  orders[orderIndex] = order;
-  await writeJsonFile(ORDERS_FILE, orders);
-
-  // Generate verified transaction row in ledger
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  const transactionId = paymentMode === 'SANDBOX_VERIFIED' 
-    ? `TXN-2026-${randomSuffix}` 
-    : `SIM-TXN-2026-${randomSuffix}`;
-
-  const newTransaction = {
-    transactionId,
-    paypalOrderId: order.orderId,
-    paypalCaptureId: captureId,
-    timestamp: new Date().toISOString(),
-    supplierId: order.supplierId,
-    supplierName: order.supplierName,
-    product: order.product,
-    quantity: order.quantity,
-    unitPrice: order.unitPrice,
-    shippingCost: order.shippingCost,
-    totalAmount: parseFloat(order.amount),
-    maxBudget: order.maxBudget || procurementMetadata.maxBudget || 0,
-    estimatedSavings: order.estimatedSavings || procurementMetadata.estimatedSavings || calculateEstimatedSavings(order.maxBudget || procurementMetadata.maxBudget, order.amount),
-    realizedSavings: order.estimatedSavings || procurementMetadata.estimatedSavings || calculateEstimatedSavings(order.maxBudget || procurementMetadata.maxBudget, order.amount), // Realized strictly upon successful capture
-    paymentStatus: "COMPLETED",
-    paymentMode,
-    notes: paymentMode === 'SANDBOX_VERIFIED'
-      ? `Settled to platform Sandbox Merchant with Supplier metadata (ID: ${order.supplierId})`
-      : `Simulated checkout record (Simulation Mode active)`
-  };
-
-  const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
-  transactions.unshift(newTransaction);
-  await writeJsonFile(TRANSACTIONS_FILE, transactions);
-
-  return {
-    success: true,
-    transaction: newTransaction,
-    paymentStatus: "COMPLETED",
-    paymentMode,
-    captureID: captureId,
-    realizedSavings: newTransaction.realizedSavings
-  };
 }
-

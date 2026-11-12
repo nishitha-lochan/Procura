@@ -376,5 +376,41 @@
     "createdAt": "2026-11-12T04:50:57.576Z",
     "capturedAt": "2026-11-12T04:51:11.069Z",
     "captureId": "9TM88201JH0838641"
+  },
+  {
+    "orderId": "SIM-ORDER-1794464192149-252",
+    "supplierId": "SUP-001",
+    "supplierName": "Apex Office Solutions [DEMO DATA]",
+    "product": "Ergonomic Mesh Task Chair",
+    "quantity": 10,
+    "unitPrice": 42,
+    "shippingCost": 250,
+    "amount": "670.00",
+    "currency": "USD",
+    "maxBudget": 1000,
+    "estimatedSavings": 330,
+    "status": "CAPTURED",
+    "mode": "SIMULATION",
+    "createdAt": "2026-11-12T06:16:32.150Z",
+    "capturedAt": "2026-11-12T06:16:32.189Z",
+    "captureId": "SIM-CAPTURE-1794464192189-797"
+  },
+  {
+    "orderId": "SIM-ORDER-1794464375501-678",
+    "supplierId": "SUP-001",
+    "supplierName": "Apex Office Solutions [DEMO DATA]",
+    "product": "Ergonomic Mesh Task Chair",
+    "quantity": 10,
+    "unitPrice": 42,
+    "shippingCost": 250,
+    "amount": "670.00",
+    "currency": "USD",
+    "maxBudget": 1000,
+    "estimatedSavings": 330,
+    "status": "CAPTURED",
+    "mode": "SIMULATION",
+    "createdAt": "2026-11-12T06:19:35.501Z",
+    "capturedAt": "2026-11-12T06:19:35.527Z",
+    "captureId": "SIM-CAPTURE-1794464375527-803"
   }
 ]

@@ -76,14 +76,16 @@ export default function SupplierComparison({
           }}
         >
           <div style={{ fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
-            Deterministic Multi-Factor Scoring Architecture (5 Dimensions):
+            Deterministic Multi-Factor Scoring Architecture (5 Dimensions — Balanced Weights: 100%):
           </div>
           <p>
-            1. <strong>Pre-filtering</strong>: Vendors with stock &lt; requested quantity or costs exceeding budget are disqualified prior to ranking.<br />
-            2. <strong>Range-Normalized Cost Score</strong>: 100 × (MaxCost - Cost) / (MaxCost - MinCost) [cheapest eligible gets 100, most expensive gets 0].<br />
-            3. <strong>Delivery SLA Score</strong>: Weighted inverse of lead-time days.<br />
-            4. <strong>Warranty & Risk Level</strong>: Factored into reliability rating and operational stability.<br />
-            5. <strong>Deterministic Tie-Breaker</strong>: Composite Score → Lower Landed Cost → Higher Rating → Faster Delivery.
+            1. <strong>Pre-filtering</strong>: Vendors with stock &lt; requested volume or landed cost exceeding budget cap are disqualified prior to ranking.<br />
+            2. <strong>Landed Cost (35%)</strong>: Range-normalized score: 100 × (MaxCost - Cost) / (MaxCost - MinCost). Cheapest compliant receives 100.<br />
+            3. <strong>Delivery SLA (20%)</strong>: Lead-time score: max(0, 100 - (days × 5)). Faster delivery receives higher score.<br />
+            4. <strong>Warranty Coverage (15%)</strong>: Evaluates warranty duration (5-Yr: 100, 3-Yr: 70, 1-Yr: 40, Lifetime: 100).<br />
+            5. <strong>Stock Cushion (15%)</strong>: Inventory depth relative to order volume (1.0x match: 50, 5.0x+ cushion: 100).<br />
+            6. <strong>Operational Risk (15%)</strong>: Evaluates risk tier (Low: 90+, Med: 60, High: 30) blended with verified supplier rating.<br />
+            7. <strong>Deterministic Tie-Breaker</strong>: Composite Score → Lower Landed Cost → Higher Risk Score → Higher Rating → Faster Delivery.
           </p>
         </div>
       )}
@@ -226,14 +228,24 @@ export default function SupplierComparison({
                   {/* Composite Score */}
                   <td>
                     {isCompliant ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span className="font-mono" style={{ fontWeight: 700, color: 'var(--primary-light)', fontSize: '14px' }}>
-                          {supplier.compositeScore}/100
-                        </span>
-                        <div style={{ fontSize: '11px', color: 'var(--warning)', display: 'flex', alignItems: 'center' }}>
-                          <Star size={11} fill="currentColor" />
-                          <span style={{ marginLeft: '2px' }}>{supplier.supplierRating}</span>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span className="font-mono" style={{ fontWeight: 700, color: 'var(--primary-light)', fontSize: '14px' }}>
+                            {supplier.compositeScore}/100
+                          </span>
+                          <div style={{ fontSize: '11px', color: 'var(--warning)', display: 'flex', alignItems: 'center' }}>
+                            <Star size={11} fill="currentColor" />
+                            <span style={{ marginLeft: '2px' }}>{supplier.supplierRating}</span>
+                          </div>
                         </div>
+                        {supplier.scoreBreakdown && (
+                          <div
+                            style={{ fontSize: '10.5px', color: 'var(--text-muted)', marginTop: '2px', cursor: 'help' }}
+                            title={`Cost: ${supplier.scoreBreakdown.costScore} | Speed: ${supplier.scoreBreakdown.speedScore} | Warranty: ${supplier.scoreBreakdown.warrantyScore} | Stock: ${supplier.scoreBreakdown.stockScore} | Risk: ${supplier.scoreBreakdown.riskScore}`}
+                          >
+                            5D: C:{Math.round(supplier.scoreBreakdown.costScore)} S:{Math.round(supplier.scoreBreakdown.speedScore)} W:{Math.round(supplier.scoreBreakdown.warrantyScore)}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <span className="badge badge-disqualified" style={{ fontSize: '10.5px' }}>

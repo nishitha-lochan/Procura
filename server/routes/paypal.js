@@ -5,7 +5,7 @@ const router = express.Router();
 
 /**
  * POST /api/paypal/create-order
- * Creates an authoritative PayPal Sandbox order.
+ * Creates an authoritative PayPal Sandbox or Simulation order.
  */
 router.post('/create-order', async (req, res) => {
   try {
@@ -18,8 +18,9 @@ router.post('/create-order', async (req, res) => {
     const orderData = await createOrder(supplierId, quantity || 1, maxBudget || 0, Boolean(forceSimulation));
     res.json(orderData);
   } catch (error) {
-    console.error('[PayPal Create Order Error]:', error);
-    res.status(500).json({ success: false, error: error.message || "Failed to create PayPal order." });
+    console.error('[PayPal Create Order Error]:', error.message);
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ success: false, error: error.message || "Failed to create PayPal order." });
   }
 });
 
@@ -38,11 +39,10 @@ router.post('/capture-order', async (req, res) => {
     const captureResult = await captureOrder(orderID, procurementMetadata);
     res.json(captureResult);
   } catch (error) {
-    console.error('[PayPal Capture Order Error]:', error);
+    console.error('[PayPal Capture Order Error]:', error.message);
     const statusCode = error.statusCode || 500;
     res.status(statusCode).json({ success: false, error: error.message || "Failed to capture PayPal order." });
   }
 });
 
 export default router;
-

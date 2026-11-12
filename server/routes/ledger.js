@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readJsonFile, writeJsonFile } from '../utils/storage.js';
-import { toCents, fromCents } from '../utils/calculations.js';
+import { toCents, fromCents, calculateLandedCost, calculateEstimatedSavings } from '../utils/calculations.js';
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -94,8 +94,18 @@ router.post('/simulate-payment', async (req, res) => {
   try {
     const { supplierId, supplierName, product, quantity, unitPrice, shippingCost, totalAmount, maxBudget, estimatedSavings } = req.body;
 
-    if (!supplierId || !quantity || !totalAmount) {
-      return res.status(400).json({ success: false, error: "Missing required transaction fields" });
+    if (!supplierId || quantity === undefined || totalAmount === undefined) {
+      return res.status(400).json({ success: false, error: "Missing required transaction fields (supplierId, quantity, totalAmount)." });
+    }
+
+    const parsedQty = parseInt(quantity, 10);
+    if (isNaN(parsedQty) || parsedQty <= 0) {
+      return res.status(400).json({ success: false, error: "Quantity must be a positive integer >= 1." });
+    }
+
+    const parsedTotal = parseFloat(totalAmount);
+    if (isNaN(parsedTotal) || parsedTotal <= 0) {
+      return res.status(400).json({ success: false, error: "Total amount must be a positive number." });
     }
 
     const timestamp = new Date().toISOString();
@@ -110,10 +120,10 @@ router.post('/simulate-payment', async (req, res) => {
       supplierId,
       supplierName: supplierName || `Supplier ${supplierId}`,
       product: product || "Procurement Item",
-      quantity: parseInt(quantity, 10),
+      quantity: parsedQty,
       unitPrice: parseFloat(unitPrice) || 0,
       shippingCost: parseFloat(shippingCost) || 0,
-      totalAmount: parseFloat(totalAmount),
+      totalAmount: parsedTotal,
       maxBudget: parseFloat(maxBudget) || 0,
       estimatedSavings: parseFloat(estimatedSavings) || 0,
       realizedSavings: parseFloat(estimatedSavings) || 0,
@@ -137,4 +147,3 @@ router.post('/simulate-payment', async (req, res) => {
 });
 
 export default router;
-
