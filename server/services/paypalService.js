@@ -1,5 +1,6 @@
 import axios from 'axios';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { PAYPAL_CREDENTIALS, isPayPalConfigured, PAYPAL_API_BASE } from '../config/paypal.js';
 import { readJsonFile, writeJsonFile, fileMutex } from '../utils/storage.js';
@@ -13,13 +14,38 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const SEED_DIR = path.join(__dirname, '../data/seed');
 
 export function getOrdersFilePath() {
-  return process.env.ORDERS_FILE_PATH || path.join(__dirname, '../data/orders.json');
+  if (process.env.ORDERS_FILE_PATH) {
+    return process.env.ORDERS_FILE_PATH;
+  }
+  const ordersPath = path.join(__dirname, '../data/orders.json');
+  const seedOrdersPath = path.join(SEED_DIR, 'sample_orders.json');
+  if (!fs.existsSync(ordersPath) && fs.existsSync(seedOrdersPath)) {
+    try {
+      fs.copyFileSync(seedOrdersPath, ordersPath);
+    } catch (e) {
+      console.warn('[Storage Notice] Could not bootstrap orders.json from seed:', e.message);
+    }
+  }
+  return ordersPath;
 }
 
 export function getTransactionsFilePath() {
-  return process.env.TRANSACTIONS_FILE_PATH || path.join(__dirname, '../data/transactions.json');
+  if (process.env.TRANSACTIONS_FILE_PATH) {
+    return process.env.TRANSACTIONS_FILE_PATH;
+  }
+  const txnsPath = path.join(__dirname, '../data/transactions.json');
+  const seedTxnsPath = path.join(SEED_DIR, 'sample_transactions.json');
+  if (!fs.existsSync(txnsPath) && fs.existsSync(seedTxnsPath)) {
+    try {
+      fs.copyFileSync(seedTxnsPath, txnsPath);
+    } catch (e) {
+      console.warn('[Storage Notice] Could not bootstrap transactions.json from seed:', e.message);
+    }
+  }
+  return txnsPath;
 }
 
 export function getSuppliersFilePath() {

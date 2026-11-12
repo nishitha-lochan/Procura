@@ -5,3 +5,8 @@ build/
 .DS_Store
 *.log
 
+# Runtime local persistent financial records (excluded from Git; seeded from server/data/seed/)
+server/data/orders.json
+server/data/transactions.json
+
+

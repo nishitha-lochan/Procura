@@ -40,10 +40,11 @@ const tempSuppliers = path.join(tempDir, 'suppliers.json');
 const tempOrders = path.join(tempDir, 'orders.json');
 const tempTransactions = path.join(tempDir, 'transactions.json');
 
-// Copy baseline data into isolated test fixtures
+// Copy baseline supplier catalog fixture into isolated test directory
 fs.copyFileSync(path.join(__dirname, '../data/suppliers.json'), tempSuppliers);
-fs.copyFileSync(path.join(__dirname, '../data/orders.json'), tempOrders);
-fs.copyFileSync(path.join(__dirname, '../data/transactions.json'), tempTransactions);
+// Initialize temporary orders and transactions as clean empty fixtures for complete determinism
+fs.writeFileSync(tempOrders, JSON.stringify([], null, 2), 'utf-8');
+fs.writeFileSync(tempTransactions, JSON.stringify([], null, 2), 'utf-8');
 
 process.env.SUPPLIERS_FILE_PATH = tempSuppliers;
 process.env.ORDERS_FILE_PATH = tempOrders;
