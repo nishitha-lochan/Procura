@@ -2,7 +2,8 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readJsonFile, writeJsonFile } from '../utils/storage.js';
-import { toCents, fromCents, calculateLandedCost, calculateEstimatedSavings } from '../utils/calculations.js';
+import { toCents, fromCents, isStrictPositiveInteger } from '../utils/calculations.js';
+import { createOrder, captureOrder } from '../services/paypalService.js';
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -89,60 +90,36 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-// POST /api/ledger/simulate-payment - Explicit Simulation Mode entry
+/**
+ * POST /api/ledger/simulate-payment
+ * Authoritative Simulation settlement endpoint.
+ * Ignores any client-submitted financial amounts and recalculates strictly against suppliers.json.
+ */
 router.post('/simulate-payment', async (req, res) => {
   try {
-    const { supplierId, supplierName, product, quantity, unitPrice, shippingCost, totalAmount, maxBudget, estimatedSavings } = req.body;
+    const { supplierId, quantity, maxBudget } = req.body;
 
-    if (!supplierId || quantity === undefined || totalAmount === undefined) {
-      return res.status(400).json({ success: false, error: "Missing required transaction fields (supplierId, quantity, totalAmount)." });
+    if (!supplierId || typeof supplierId !== 'string') {
+      return res.status(400).json({ success: false, error: "supplierId is required and must be a valid string." });
     }
 
-    const parsedQty = parseInt(quantity, 10);
-    if (isNaN(parsedQty) || parsedQty <= 0) {
+    if (!isStrictPositiveInteger(quantity)) {
       return res.status(400).json({ success: false, error: "Quantity must be a positive integer >= 1." });
     }
 
-    const parsedTotal = parseFloat(totalAmount);
-    if (isNaN(parsedTotal) || parsedTotal <= 0) {
-      return res.status(400).json({ success: false, error: "Total amount must be a positive number." });
-    }
-
-    const timestamp = new Date().toISOString();
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const transactionId = `SIM-TXN-2026-${randomSuffix}`;
-
-    const newTransaction = {
-      transactionId,
-      paypalOrderId: "N/A (SIMULATED)",
-      paypalCaptureId: "N/A (SIMULATED)",
-      timestamp,
-      supplierId,
-      supplierName: supplierName || `Supplier ${supplierId}`,
-      product: product || "Procurement Item",
-      quantity: parsedQty,
-      unitPrice: parseFloat(unitPrice) || 0,
-      shippingCost: parseFloat(shippingCost) || 0,
-      totalAmount: parsedTotal,
-      maxBudget: parseFloat(maxBudget) || 0,
-      estimatedSavings: parseFloat(estimatedSavings) || 0,
-      realizedSavings: parseFloat(estimatedSavings) || 0,
-      paymentStatus: "COMPLETED",
-      paymentMode: "SIMULATION",
-      notes: "Simulated checkout (PayPal credentials not configured or Simulation Mode selected)"
-    };
-
-    const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
-    transactions.unshift(newTransaction);
-    await writeJsonFile(TRANSACTIONS_FILE, transactions);
+    // Route authoritatively through server-side createOrder and captureOrder
+    // This completely prevents client-side price/savings tampering
+    const order = await createOrder(supplierId, quantity, maxBudget || 0, true);
+    const captureResult = await captureOrder(order.orderID, { maxBudget: maxBudget || 0 });
 
     res.json({
       success: true,
-      transaction: newTransaction,
-      message: "Simulated settlement recorded successfully."
+      transaction: captureResult.transaction,
+      message: "Authoritative simulated settlement recorded successfully."
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ success: false, error: error.message || "Failed to process simulated payment." });
   }
 });
 

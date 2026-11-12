@@ -1,5 +1,5 @@
 import express from 'express';
-import { createOrder, captureOrder } from '../services/paypalService.js';
+import { createOrder, captureOrder, reconcileOrderWithPayPal } from '../services/paypalService.js';
 
 const router = express.Router();
 
@@ -42,6 +42,25 @@ router.post('/capture-order', async (req, res) => {
     console.error('[PayPal Capture Order Error]:', error.message);
     const statusCode = error.statusCode || 500;
     res.status(statusCode).json({ success: false, error: error.message || "Failed to capture PayPal order." });
+  }
+});
+
+/**
+ * POST /api/paypal/reconcile-order
+ * Reconciles an order with PayPal if the status was uncertain or interrupted.
+ */
+router.post('/reconcile-order', async (req, res) => {
+  try {
+    const { orderID } = req.body;
+    if (!orderID) {
+      return res.status(400).json({ success: false, error: "orderID is required for reconciliation." });
+    }
+    const result = await reconcileOrderWithPayPal(orderID);
+    res.json(result);
+  } catch (error) {
+    console.error('[PayPal Reconcile Order Error]:', error.message);
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ success: false, error: error.message || "Failed to reconcile PayPal order." });
   }
 });
 

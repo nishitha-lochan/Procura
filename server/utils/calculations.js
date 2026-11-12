@@ -36,6 +36,24 @@ export function fromCents(cents) {
 }
 
 /**
+ * Strict positive integer validation.
+ * Rejects decimals (e.g. 2.5), malformed alphanumeric strings (e.g. "10abc"), zero, negatives, NaN, and infinity.
+ */
+export function isStrictPositiveInteger(val) {
+  if (val === null || val === undefined) return false;
+  if (typeof val === 'number') {
+    return Number.isInteger(val) && val > 0 && isFinite(val);
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!/^\d+$/.test(trimmed)) return false;
+    const num = Number(trimmed);
+    return Number.isInteger(num) && num > 0 && isFinite(num);
+  }
+  return false;
+}
+
+/**
  * Calculates landed purchase cost in dollars: (unitPrice * quantity) + shippingCost
  */
 export function calculateLandedCost(unitPrice, quantity, shippingCost = 0) {

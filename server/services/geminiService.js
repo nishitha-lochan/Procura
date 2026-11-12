@@ -137,8 +137,8 @@ ${JSON.stringify(comparisonResult.comparison.map(c => ({
 })), null, 2)}
 
 Provide:
-1. An executive recommendation summary (2-3 sentences) explaining why ${topSupplier.name} was chosen over the competitors across Price, Delivery Time, Warranty, Stock, and Risk. Include exact landed cost $${topSupplier.totalCost.toFixed(2)} and savings $${topSupplier.estimatedSavings.toFixed(2)}.
-2. Explicit operational/financial risk analysis for each supplier (especially explaining why the non-recommended suppliers pose higher risk).`;
+1. An executive qualitative rationale (2 sentences) explaining why ${topSupplier.name} was chosen over competitors across Delivery SLA, Warranty Coverage, Stock Cushion, and Operational Risk.
+2. Explicit operational/financial risk analysis for each supplier (especially explaining why the non-recommended suppliers pose higher operational or supply chain risk).`;
 
         const reasoningResponse = await genAI.models.generateContent({
           model: modelToUse,
@@ -172,7 +172,11 @@ Provide:
         if (reasoningResponse.text) {
           const parsedReasoning = JSON.parse(reasoningResponse.text);
           if (parsedReasoning.executiveRecommendation) {
-            narrativeText = parsedReasoning.executiveRecommendation;
+            // Anchor financial numbers deterministically to prevent LLM arithmetic hallucination
+            const deterministicPrefix = `${topSupplier.name} is recommended at an authoritative landed settlement of $${topSupplier.totalCost.toFixed(2)}` +
+              (topSupplier.estimatedSavings > 0 ? ` (saving $${topSupplier.estimatedSavings.toFixed(2)} vs budget). ` : '. ');
+            
+            narrativeText = `${deterministicPrefix}${parsedReasoning.executiveRecommendation}`;
           }
           if (parsedReasoning.supplierRisks && Array.isArray(parsedReasoning.supplierRisks)) {
             // Merge with deterministic supplier list

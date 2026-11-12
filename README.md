@@ -258,7 +258,7 @@ Every completed settlement is permanently recorded in the AG Grid audit ledger w
 My implementation of the PayPal integration enforces strict separation between client-side user experience and server-side financial authority.
 
 ### 1. In-Memory OAuth2 Token Lifecycle
-In [`server/services/paypalService.js`](file:///c:/Users/nishi/Desktop/Paypal/server/services/paypalService.js), I implemented an in-memory OAuth2 token manager. It requests access tokens from `POST /v1/oauth2/token` using HTTP Basic Authentication (`clientId:clientSecret`). The token is cached in memory with a 5-minute pre-expiration buffer to eliminate authentication latency during live checkout sessions.
+In [`server/services/paypalService.js`](server/services/paypalService.js), I implemented an in-memory OAuth2 token manager. It requests access tokens from `POST /v1/oauth2/token` using HTTP Basic Authentication (`clientId:clientSecret`). The token is cached in memory with a 5-minute pre-expiration buffer to eliminate authentication latency during live checkout sessions.
 
 ### 2. Server-Side Authoritative Order Creation
 Client-submitted prices are intentionally discarded. The backend retrieves the supplier record from `server/data/suppliers.json` and computes the exact landed cost:
@@ -302,8 +302,8 @@ if (capturedCents !== expectedCents) {
 }
 ```
 
-### 4. Idempotent State Locking and Order Lifecycle
-To prevent double-capture submissions, race conditions, and accidental replay attempts, `captureOrder` enforces an explicit order lifecycle backed by an asynchronous in-memory mutex (`fileMutex` in [`server/utils/storage.js`](file:///c:/Users/nishi/Desktop/Paypal/server/utils/storage.js)):
+### 4. Idempotent State Locking and Resilient Order Lifecycle
+To prevent double-capture submissions, race conditions, and accidental replay attempts, `captureOrder` enforces an explicit order lifecycle backed by an asynchronous mutex (`fileMutex` in [`server/utils/storage.js`](server/utils/storage.js)):
 
 $$\text{CREATED} \xrightarrow{\text{capture requested}} \text{CAPTURING} \xrightarrow{\text{PayPal capture verified}} \text{CAPTURED}$$
 
@@ -320,14 +320,29 @@ if (order.status === 'CAPTURING') {
   error.statusCode = 409;
   throw error;
 }
+
+if (order.status === 'MANUAL_RECONCILIATION_REQUIRED' || order.status === 'CAPTURE_UNKNOWN') {
+  const error = new Error(`Order "${orderId}" is in reconciliation state. Re-capture is blocked to prevent duplicate charges.`);
+  error.statusCode = 409;
+  throw error;
+}
 ```
-If an error occurs prior to completion (such as an unapproved payment token or transient network interruption), the status safely reverts to `CREATED` so the buyer can re-attempt approval without corrupting the state. Once verified, the order status transitions to `CAPTURED`, the capture ID is persisted, and a new transaction row is committed to `server/data/transactions.json`.
+
+#### Safe Error Classification:
+- **Pre-Capture Failures (`ORDER_NOT_APPROVED`)**: The buyer has not authorized the order in the PayPal modal. Funds were never collected. The order safely resets to `CREATED` so the buyer can re-attempt checkout.
+- **Post-Capture Discrepancies**: If PayPal captures the funds but an integer-cent check fails, the order transitions to `MANUAL_RECONCILIATION_REQUIRED` and persists the capture ID. It is strictly blocked from re-capture to eliminate double-charging.
+- **Uncertain Outcomes (Network Drop / Gateway Timeout)**: If the connection terminates during capture dispatch, the order locks into `CAPTURE_UNKNOWN`. A dedicated reconciliation routine (`reconcileOrderWithPayPal()`) queries PayPal's `GET /v2/checkout/orders/{id}` to verify payment status before releasing the state.
+
+#### Atomic Ledger Recording and Startup Auto-Recovery:
+Both order persistence and ledger writing are protected by serialized locks (`transactions-ledger-lock`). Ledger recording is strictly idempotent by `paypalOrderId` and `paypalCaptureId`. On server reboot, `reconcileLedgerAndOrders()` automatically checks for any captured orders missing ledger records and unsticks any orders interrupted during a server crash.
+
+> **Single-Process vs. Enterprise Note**: The in-memory mutex coordinates concurrent requests within a single Node.js process instance (appropriate for hackathon demonstrations). For multi-instance clustered enterprise deployments, this boundary transitions to distributed PostgreSQL row-level locks (`SELECT ... FOR UPDATE`) or Redis Redlock.
 
 ---
 
 ## 11. Gemini AI Integration Details
 
-I integrated Google Gemini (`gemini-3.1-flash-lite`) using the official `@google/genai` SDK in [`server/services/geminiService.js`](file:///c:/Users/nishi/Desktop/Paypal/server/services/geminiService.js).
+I integrated Google Gemini (`gemini-3.1-flash-lite`) using the official `@google/genai` SDK in [`server/services/geminiService.js`](server/services/geminiService.js).
 
 Rather than relying on unconstrained chat completions, the integration operates as a structured multi-step pipeline:
 
@@ -435,8 +450,8 @@ All endpoints are hosted on the Express backend (`http://localhost:5000` by defa
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-username/procura.git
-   cd procura
+   git clone https://github.com/nishitha-lochan/Procura.git
+   cd Procura
    ```
 
 2. **Install all dependencies**:
@@ -520,7 +535,7 @@ npm run preview
 
 ## 17. Testing and Verification
 
-I developed a comprehensive automated test suite in [`server/tests/testScoring.js`](file:///c:/Users/nishi/Desktop/Paypal/server/tests/testScoring.js) to verify mathematical precision, 5-dimensional scoring, catalog evaluation, heuristic extraction, server-side validation, and payment state machines.
+I developed a comprehensive automated test suite in [`server/tests/testScoring.js`](server/tests/testScoring.js) to verify mathematical precision, 5-dimensional scoring, catalog evaluation, heuristic extraction, server-side validation, and payment state machines.
 
 To execute the test suite:
 ```powershell
@@ -528,8 +543,8 @@ npm test
 ```
 *(Or navigate to `server/` and run `node tests/testScoring.js`).*
 
-### Test Coverage Summary (70 Automated Tests Across 6 Domains):
-- **1. Financial Precision & Integer Cents (10 tests)**: Asserts that `toCents()` eliminates floating-point currency drift (`0.1 + 0.2 === 0.3`), tests string parsing, null/NaN sanitization, landed cost calculation, and budget-relative savings.
+### Test Coverage Summary (87 Assertions Across 6 Domains — 81 Executed Passing Assertions):
+- **1. Financial Precision & Integer Cents (18 tests)**: Asserts that `toCents()` eliminates floating-point currency drift (`0.1 + 0.2 === 0.3`), tests string parsing, null/NaN sanitization, landed cost calculation, and budget-relative savings. Validates strict positive integer parsing (accepts `10`, `"25"`; rejects decimals `2.5`, `"2.5"`, malformed strings `"10abc"`, zero, negatives, and NaN).
 - **2. 5-Dimensional Scoring Engine (25 tests)**:
   - *Landed Cost (35%)*: Range-normalized score bounds (cheapest = 100, most expensive = 0, midpoint = 50, identical prices = 100).
   - *Delivery SLA (20%)*: Lead-time score decay (2-day = 90, 5-day = 75, 9-day = 55).
@@ -539,8 +554,8 @@ npm test
   - *Weight Verification*: Validates that weights for all priority profiles (`balanced`, `cost`, `speed`, `quality`) sum to exactly 1.0 (100%).
 - **3. Quotation Comparison & Ranking (11 tests)**: Validates full catalogue ranking, stock and budget pre-filtering (SUP-003 disqualified for 80 < 100 units), zero budget handling, over-budget rejection, and empty catalogue safety.
 - **4. Requirement Extraction & Heuristics (7 tests)**: Verifies that delivery days ("5 days") are never mistaken for order quantity and product model numbers ("5540") are never mistaken for budget or quantity.
-- **5. Server-Side Order Validation (7 tests)**: Validates that `createOrder` enforces positive integer quantities, rejects non-existent suppliers (404), rejects orders exceeding available inventory (400), and rejects orders exceeding budget caps (400).
-- **6. Order State Machine & Double-Capture Protection (4 tests)**: Verifies `CREATED` -> `CAPTURING` -> `CAPTURED` lifecycle, validates successful simulation capture with integer cents, rejects invalid order IDs (404), and strictly blocks double capture attempts with HTTP 409 Conflict.
+- **5. Server-Side Order Validation (9 tests)**: Validates that `createOrder` enforces positive integer quantities (rejecting negatives, decimals `2.5`, and strings `"10abc"` with HTTP 400), rejects non-existent suppliers (404), rejects orders exceeding available inventory (400), and rejects orders exceeding budget caps (400).
+- **6. Order State Machine, Double-Capture Protection & Reconciliation (5 tests)**: Verifies `CREATED` -> `CAPTURING` -> `CAPTURED` lifecycle, validates successful simulation capture with integer cents, rejects invalid order IDs (404), strictly blocks double capture attempts with HTTP 409 Conflict, and verifies automated startup ledger reconciliation.
 
 Verified test output:
 ```text
@@ -559,6 +574,14 @@ Verified test output:
 ✅ PASS: calculateEstimatedSavings calculates $5000 - $4450 = $550
 ✅ PASS: calculateEstimatedSavings returns 0 when cost exceeds budget
 ✅ PASS: calculateEstimatedSavings returns 0 when budget is unspecified
+✅ PASS: isStrictPositiveInteger accepts positive integer (10)
+✅ PASS: isStrictPositiveInteger accepts clean numeric string ("25")
+✅ PASS: isStrictPositiveInteger strictly rejects decimal numbers (2.5)
+✅ PASS: isStrictPositiveInteger strictly rejects decimal strings ("2.5")
+✅ PASS: isStrictPositiveInteger strictly rejects alphanumeric strings ("10abc")
+✅ PASS: isStrictPositiveInteger strictly rejects 0
+✅ PASS: isStrictPositiveInteger strictly rejects negative numbers
+✅ PASS: isStrictPositiveInteger strictly rejects NaN and null
 
 --- 2. 5-Dimensional Scoring Engine ---
 ✅ PASS: Cheapest compliant vendor gets 100 (got 100)
@@ -617,6 +640,8 @@ Verified test output:
 --- 5. Server-Side Order Validation (createOrder) ---
 ✅ PASS: createOrder throws 404 for unknown supplier (got 404)
 ✅ PASS: createOrder throws 400 for negative quantity (got 400)
+✅ PASS: createOrder throws 400 for decimal quantity (got 400)
+✅ PASS: createOrder throws 400 for malformed quantity string (got 400)
 ✅ PASS: createOrder throws 400 when quantity exceeds stock (got 400)
 ✅ PASS: createOrder throws 400 when cost exceeds budget cap (got 400)
 ✅ PASS: Valid simulation order creates successfully
@@ -629,9 +654,10 @@ Verified test output:
 ✅ PASS: Captured order has COMPLETED status
 ✅ PASS: Transaction records exact totalAmount $670 (got 670)
 ✅ PASS: Double capture attempt throws HTTP 409 Conflict (got 409)
+✅ PASS: reconcileLedgerAndOrders runs cleanly without errors
 
 ================================================================
-     TEST EXECUTION COMPLETE: 70 PASSED, 0 FAILED
+     TEST EXECUTION COMPLETE: 81 PASSED, 0 FAILED
 ================================================================
 ```
 
@@ -641,7 +667,7 @@ Verified test output:
 
 | # | Technical Challenge | Root Cause Identified | Engineering Solution Implemented |
 | :--- | :--- | :--- | :--- |
-| **1** | **Floating-Point Precision Hazards** | Standard JavaScript IEEE-754 floating-point math produces rounding errors (`0.1 + 0.2 = 0.30000000000000004`), which can cause cent-level capture mismatches with payment gateways. | Developed an authoritative integer-cent utility module ([`server/utils/calculations.js`](file:///c:/Users/nishi/Desktop/Paypal/server/utils/calculations.js)). All calculations, budget comparisons, and capture assertions occur in integer cents before formatting. |
+| **1** | **Floating-Point Precision Hazards** | Standard JavaScript IEEE-754 floating-point math produces rounding errors (`0.1 + 0.2 = 0.30000000000000004`), which can cause cent-level capture mismatches with payment gateways. | Developed an authoritative integer-cent utility module ([`server/utils/calculations.js`](server/utils/calculations.js)). All calculations, budget comparisons, and capture assertions occur in integer cents before formatting. |
 | **2** | **Gemini Multi-Turn Thought Signature Loss** | In Gemini 3.x models, passing chat history across multi-turn conversational function calls dropped internal `thought_signature` fields, resulting in `400 Bad Request` exceptions. | Re-architected `geminiService.js` to use typed `responseSchema` JSON generation for extraction and reasoning, bridged with deterministic backend function execution. |
 | **3** | **PayPal Sandbox Payment Method Rejections** | During initial sandbox checkout tests, transactions failed with generic error codes (`UNSUPPORTED_PAYMENT_METHOD`) when testing domestic transactions between sandbox accounts with conflicting regional configurations. | Configured an international buyer testing profile using a verified US Personal Sandbox Buyer account (`Country: US`), ensuring cross-border USD settlements succeed reliably. |
 | **4** | **Client-Side Parameter Tampering Vulnerabilities** | If the payment total were derived from frontend component state, a malicious actor could modify DOM values or API request bodies to alter purchase totals. | Implemented absolute server-side price authority. The backend discards client-submitted prices and calculates landed totals directly from persistent supplier records. |

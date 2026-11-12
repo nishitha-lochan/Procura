@@ -8,6 +8,7 @@ import suppliersRouter from './routes/suppliers.js';
 import ledgerRouter from './routes/ledger.js';
 import agentRouter from './routes/agent.js';
 import paypalRouter from './routes/paypal.js';
+import { reconcileLedgerAndOrders } from './services/paypalService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -65,6 +66,14 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Procura Server listening on http://localhost:${PORT}`);
+  try {
+    const recovery = await reconcileLedgerAndOrders();
+    if (recovery.reconciledCount > 0) {
+      console.log(`[Auto-Recovery] Reconciled ${recovery.reconciledCount} missing transaction record(s).`);
+    }
+  } catch (recErr) {
+    console.warn(`[Auto-Recovery Notice]:`, recErr.message);
+  }
 });

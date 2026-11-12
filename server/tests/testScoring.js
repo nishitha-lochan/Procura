@@ -11,10 +11,11 @@ import {
   calculateRatingScore,
   getScoringWeights,
   calculateCompositeScore,
-  compareRankedSuppliers
+  compareRankedSuppliers,
+  isStrictPositiveInteger
 } from '../utils/calculations.js';
 import { getQuotes, extractRequirements, compareQuotes } from '../services/procurementService.js';
-import { createOrder, captureOrder } from '../services/paypalService.js';
+import { createOrder, captureOrder, reconcileLedgerAndOrders } from '../services/paypalService.js';
 
 console.log('================================================================');
 console.log('     PROCURA — COMPREHENSIVE PRODUCTION TEST SUITE             ');
@@ -50,6 +51,16 @@ async function runTests() {
   assert(calculateEstimatedSavings(5000, 4450) === 550.00, 'calculateEstimatedSavings calculates $5000 - $4450 = $550');
   assert(calculateEstimatedSavings(4000, 4450) === 0, 'calculateEstimatedSavings returns 0 when cost exceeds budget');
   assert(calculateEstimatedSavings(0, 4450) === 0, 'calculateEstimatedSavings returns 0 when budget is unspecified');
+
+  // Strict Integer Validation Tests
+  assert(isStrictPositiveInteger(10) === true, 'isStrictPositiveInteger accepts positive integer (10)');
+  assert(isStrictPositiveInteger('25') === true, 'isStrictPositiveInteger accepts clean numeric string ("25")');
+  assert(isStrictPositiveInteger(2.5) === false, 'isStrictPositiveInteger strictly rejects decimal numbers (2.5)');
+  assert(isStrictPositiveInteger('2.5') === false, 'isStrictPositiveInteger strictly rejects decimal strings ("2.5")');
+  assert(isStrictPositiveInteger('10abc') === false, 'isStrictPositiveInteger strictly rejects alphanumeric strings ("10abc")');
+  assert(isStrictPositiveInteger(0) === false && isStrictPositiveInteger('0') === false, 'isStrictPositiveInteger strictly rejects 0');
+  assert(isStrictPositiveInteger(-5) === false && isStrictPositiveInteger('-5') === false, 'isStrictPositiveInteger strictly rejects negative numbers');
+  assert(isStrictPositiveInteger(NaN) === false && isStrictPositiveInteger(null) === false, 'isStrictPositiveInteger strictly rejects NaN and null');
 
   // -------------------------------------------------------------------------
   // 2. 5-DIMENSIONAL SCORING ENGINE TESTS
@@ -143,7 +154,7 @@ async function runTests() {
   assert(resultEmpty.compliantCount === 0 && resultEmpty.totalEvaluated === 0, 'compareQuotes handles empty quote list gracefully');
 
   // -------------------------------------------------------------------------
-  // 4. REQUIREMENT EXTRACTION & HEURISTIC FALLBACK
+  // 4. REQUIREMENT EXTRACTION & HEURISTICS
   // -------------------------------------------------------------------------
   console.log('\n--- 4. Requirement Extraction & Heuristics ---');
 
@@ -173,12 +184,26 @@ async function runTests() {
     assert(err.statusCode === 404, `createOrder throws 404 for unknown supplier (got ${err.statusCode})`);
   }
 
-  // Test 5b: Invalid / Negative Quantity
+  // Test 5b: Invalid / Negative / Decimal Quantity
   try {
     await createOrder('SUP-001', -5, 5000, true);
     assert(false, 'createOrder should reject negative quantity');
   } catch (err) {
     assert(err.statusCode === 400, `createOrder throws 400 for negative quantity (got ${err.statusCode})`);
+  }
+
+  try {
+    await createOrder('SUP-001', 2.5, 5000, true);
+    assert(false, 'createOrder should reject decimal quantity (2.5)');
+  } catch (err) {
+    assert(err.statusCode === 400, `createOrder throws 400 for decimal quantity (got ${err.statusCode})`);
+  }
+
+  try {
+    await createOrder('SUP-001', '10abc', 5000, true);
+    assert(false, 'createOrder should reject malformed quantity string ("10abc")');
+  } catch (err) {
+    assert(err.statusCode === 400, `createOrder throws 400 for malformed quantity string (got ${err.statusCode})`);
   }
 
   // Test 5c: Quantity Exceeding Stock Limit
@@ -204,7 +229,7 @@ async function runTests() {
   assert(simOrder.amount === '670.00', `Authoritative landed cost for 10 units is $670.00 (got ${simOrder.amount})`);
 
   // -------------------------------------------------------------------------
-  // 6. ORDER STATE MACHINE & DOUBLE-CAPTURE PROTECTION
+  // 6. ORDER STATE MACHINE, DOUBLE-CAPTURE PROTECTION & RECONCILIATION
   // -------------------------------------------------------------------------
   console.log('\n--- 6. Order State Machine & Double-Capture Protection ---');
 
@@ -229,6 +254,10 @@ async function runTests() {
   } catch (err) {
     assert(err.statusCode === 409, `Double capture attempt throws HTTP 409 Conflict (got ${err.statusCode})`);
   }
+
+  // Test 6d: Auto-Reconciliation of Ledger
+  const recResult = await reconcileLedgerAndOrders();
+  assert(recResult.success === true, 'reconcileLedgerAndOrders runs cleanly without errors');
 
   console.log('\n================================================================');
   console.log(`     TEST EXECUTION COMPLETE: ${passed} PASSED, ${failed} FAILED`);

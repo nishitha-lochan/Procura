@@ -1,5 +1,5 @@
 {
-  "name": "procurepal-matrix",
+  "name": "procura",
   "version": "1.0.0",
   "description": "Procura — AI-Powered B2B Procurement Copilot & PayPal Settlement Engine",
   "scripts": {
@@ -16,6 +16,6 @@
     "ag-grid",
     "hackathon-2026"
   ],
-  "author": "",
+  "author": "Nishitha Lochan",
   "license": "MIT"
 }
