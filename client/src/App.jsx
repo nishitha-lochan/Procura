@@ -33,6 +33,13 @@ export default function App() {
       return null;
     }
   });
+  const [isQuoteSettled, setIsQuoteSettled] = useState(() => {
+    try {
+      return localStorage.getItem('procura_is_quote_settled') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [completedTransaction, setCompletedTransaction] = useState(null);
 
   const saveAgentResult = (res) => {
@@ -48,6 +55,14 @@ export default function App() {
     try {
       if (sup) localStorage.setItem('procura_selected_supplier', JSON.stringify(sup));
       else localStorage.removeItem('procura_selected_supplier');
+    } catch (e) {}
+  };
+
+  const saveIsQuoteSettled = (val) => {
+    setIsQuoteSettled(val);
+    try {
+      if (val) localStorage.setItem('procura_is_quote_settled', 'true');
+      else localStorage.removeItem('procura_is_quote_settled');
     } catch (e) {}
   };
 
@@ -85,6 +100,7 @@ export default function App() {
   const handleRequisitionSubmit = async (prompt, priority = 'balanced') => {
     setIsAgentLoading(true);
     saveSelectedSupplier(null);
+    saveIsQuoteSettled(false);
     try {
       // Append priority intent if specified
       const augmentedPrompt = priority && priority !== 'balanced'
@@ -93,6 +109,7 @@ export default function App() {
 
       const result = await api.runProcureAgent(augmentedPrompt);
       saveAgentResult(result);
+      saveIsQuoteSettled(false);
 
       // Auto-select top recommended supplier for convenience
       if (result.recommendation?.topQuote) {
@@ -117,13 +134,15 @@ export default function App() {
   const handlePaymentSuccess = async (txn) => {
     setCompletedTransaction(txn);
     saveSelectedSupplier(null); // Close checkout drawer cleanly
-    // Retain agentResult in state and localStorage so the AI evaluation, supplier matrix,
-    // and active estimated savings remain persistent after settlement and across refreshes.
+    saveIsQuoteSettled(true); // Auto-reset active estimated savings to $0.00 (Settled)
+    // Retain agentResult in state and localStorage so the AI evaluation and supplier matrix
+    // remain viewable in the workspace after settlement.
     await loadDashboardData();
   };
 
   const handleSelectSupplierForPayment = (supplier) => {
     saveSelectedSupplier(supplier);
+    saveIsQuoteSettled(false);
     setActiveSection('payment');
     setTimeout(() => {
       const el = document.getElementById('payment-section');
@@ -139,9 +158,19 @@ export default function App() {
     }, 150);
   };
 
-  const activeQuote = selectedSupplier || agentResult?.recommendation?.topQuote;
-  const currentEstimatedSavings = activeQuote?.estimatedSavings ?? agentResult?.recommendation?.estimatedSavings ?? 0;
-  const activeQuoteName = activeQuote?.name || agentResult?.recommendation?.selectedSupplierName || null;
+  // Determine if active quote is already settled in the ledger
+  const topSupplierId = agentResult?.recommendation?.topQuote?.supplierId || agentResult?.recommendation?.selectedSupplierId;
+  const isLatestTxnMatchingQuote = Boolean(
+    topSupplierId &&
+    transactions.length > 0 &&
+    transactions[0]?.supplierId === topSupplierId &&
+    transactions[0]?.paymentStatus === 'COMPLETED'
+  );
+  const effectiveQuoteSettled = isQuoteSettled || isLatestTxnMatchingQuote;
+
+  const activeQuote = effectiveQuoteSettled ? null : (selectedSupplier || agentResult?.recommendation?.topQuote);
+  const currentEstimatedSavings = effectiveQuoteSettled ? 0 : (activeQuote?.estimatedSavings ?? agentResult?.recommendation?.estimatedSavings ?? 0);
+  const activeQuoteName = effectiveQuoteSettled ? null : (activeQuote?.name || agentResult?.recommendation?.selectedSupplierName || null);
 
   return (
     <div className={`app-layout ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
@@ -188,6 +217,7 @@ export default function App() {
               transactions={transactions}
               currentEstimatedSavings={currentEstimatedSavings}
               activeQuoteName={activeQuoteName}
+              isQuoteSettled={effectiveQuoteSettled}
               isLoading={isDashboardLoading}
             />
           </div>

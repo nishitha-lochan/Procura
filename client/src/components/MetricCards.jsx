@@ -36,6 +36,7 @@ export default function MetricCards({
   transactions = [],
   currentEstimatedSavings = 0,
   activeQuoteName = null,
+  isQuoteSettled = false,
   isLoading = false
 }) {
   const sandbox = stats?.sandbox || { totalSpend: 0, realizedSavings: 0, completedPayments: 0 };
@@ -193,6 +194,13 @@ export default function MetricCards({
                 >
                   {activeQuoteName ? `${activeQuoteName}` : 'Identified in active quote'}
                 </span>
+              </>
+            ) : isQuoteSettled ? (
+              <>
+                <span className="badge badge-sandbox" style={{ padding: '1px 6px', fontSize: '10px' }}>
+                  SETTLED
+                </span>
+                <span>Captured into realized savings</span>
               </>
             ) : (
               <>
