@@ -17,6 +17,13 @@ const ORDERS_FILE = path.join(__dirname, '../data/orders.json');
 const TRANSACTIONS_FILE = path.join(__dirname, '../data/transactions.json');
 const SUPPLIERS_FILE = path.join(__dirname, '../data/suppliers.json');
 
+// Global mutex lock keys enforcing strict hierarchical lock order:
+// Level 1: `order-lock-${orderId}`
+// Level 2: `orders-file-lock`
+// Level 3: `transactions-ledger-lock`
+export const ORDERS_LOCK_KEY = 'orders-file-lock';
+export const LEDGER_LOCK_KEY = 'transactions-ledger-lock';
+
 // In-memory token cache
 let cachedToken = null;
 let tokenExpiresAt = 0;
@@ -59,7 +66,7 @@ export async function getPayPalAccessToken() {
 
 /**
  * Creates an authoritative PayPal order on the backend.
- * Validates quantity, stock availability, and budget caps authoritatively against suppliers.json.
+ * Uses shared `orders-file-lock` to prevent concurrent order creation race conditions.
  */
 export async function createOrder(supplierId, quantityRequested = 1, maxBudget = 0, forceSimulation = false) {
   if (!supplierId || typeof supplierId !== 'string') {
@@ -130,9 +137,15 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
       createdAt: new Date().toISOString()
     };
 
-    const orders = await readJsonFile(ORDERS_FILE, []);
-    orders.push(pendingOrder);
-    await writeJsonFile(ORDERS_FILE, orders);
+    // Shared orders-file lock prevents concurrent createOrder race conditions
+    const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+    try {
+      const orders = await readJsonFile(ORDERS_FILE, []);
+      orders.push(pendingOrder);
+      await writeJsonFile(ORDERS_FILE, orders);
+    } finally {
+      releaseOrders();
+    }
 
     return {
       success: true,
@@ -197,9 +210,15 @@ export async function createOrder(supplierId, quantityRequested = 1, maxBudget =
     createdAt: new Date().toISOString()
   };
 
-  const orders = await readJsonFile(ORDERS_FILE, []);
-  orders.push(pendingOrder);
-  await writeJsonFile(ORDERS_FILE, orders);
+  // Shared orders-file lock prevents concurrent createOrder race conditions
+  const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+  try {
+    const orders = await readJsonFile(ORDERS_FILE, []);
+    orders.push(pendingOrder);
+    await writeJsonFile(ORDERS_FILE, orders);
+  } finally {
+    releaseOrders();
+  }
 
   return {
     success: true,
@@ -223,47 +242,56 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
     throw error;
   }
 
-  // Mutex on specific order ID prevents concurrent duplicate calls
+  // Mutex on specific order ID prevents duplicate concurrent captures for the SAME order
   const releaseOrderLock = await fileMutex.acquire(`order-lock-${orderId}`);
 
   try {
-    const orders = await readJsonFile(ORDERS_FILE, []);
-    const orderIndex = orders.findIndex(o => o.orderId === orderId);
+    let order;
+    let orderIndex = -1;
 
-    if (orderIndex === -1) {
-      const error = new Error(`Order "${orderId}" not found in persistent orders registry.`);
-      error.statusCode = 404;
-      throw error;
+    // Read and transition to CAPTURING under shared orders-file lock
+    const releaseInitialOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+    try {
+      const orders = await readJsonFile(ORDERS_FILE, []);
+      orderIndex = orders.findIndex(o => o.orderId === orderId);
+
+      if (orderIndex === -1) {
+        const error = new Error(`Order "${orderId}" not found in persistent orders registry.`);
+        error.statusCode = 404;
+        throw error;
+      }
+
+      order = orders[orderIndex];
+
+      // State machine validation
+      if (order.status === 'CAPTURED') {
+        const error = new Error(`Order "${orderId}" has already been captured and settled.`);
+        error.statusCode = 409;
+        throw error;
+      }
+
+      if (order.status === 'CAPTURING') {
+        const error = new Error(`Payment capture for order "${orderId}" is currently in progress. Please wait.`);
+        error.statusCode = 409;
+        throw error;
+      }
+
+      if (order.status === 'MANUAL_RECONCILIATION_REQUIRED' || order.status === 'CAPTURE_UNKNOWN') {
+        const error = new Error(
+          `Order "${orderId}" is in reconciliation state (${order.status}: ${order.reconciliationReason || 'Uncertain capture status'}). ` +
+          `Re-capture is blocked to prevent duplicate charges. Please run reconciliation.`
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // Transition state to CAPTURING
+      order.status = 'CAPTURING';
+      orders[orderIndex] = order;
+      await writeJsonFile(ORDERS_FILE, orders);
+    } finally {
+      releaseInitialOrders();
     }
-
-    const order = orders[orderIndex];
-
-    // State machine inspection
-    if (order.status === 'CAPTURED') {
-      const error = new Error(`Order "${orderId}" has already been captured and settled.`);
-      error.statusCode = 409;
-      throw error;
-    }
-
-    if (order.status === 'CAPTURING') {
-      const error = new Error(`Payment capture for order "${orderId}" is currently in progress. Please wait.`);
-      error.statusCode = 409;
-      throw error;
-    }
-
-    if (order.status === 'MANUAL_RECONCILIATION_REQUIRED' || order.status === 'CAPTURE_UNKNOWN') {
-      const error = new Error(
-        `Order "${orderId}" is in reconciliation state (${order.status}: ${order.reconciliationReason || 'Uncertain capture status'}). ` +
-        `Re-capture is blocked to prevent duplicate charges. Please run reconciliation.`
-      );
-      error.statusCode = 409;
-      throw error;
-    }
-
-    // Transition state to CAPTURING
-    order.status = 'CAPTURING';
-    orders[orderIndex] = order;
-    await writeJsonFile(ORDERS_FILE, orders);
 
     let captureId;
     let paymentMode = order.mode === 'SANDBOX' ? 'SANDBOX_VERIFIED' : 'SIMULATION';
@@ -285,44 +313,52 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
           }
         );
       } catch (err) {
-        // Dissect error: distinguish definite pre-capture errors from uncertain dispatch outcomes
         const errDetails = err.response?.data?.details;
         const issue = errDetails?.[0]?.issue;
 
-        if (issue === 'ORDER_NOT_APPROVED') {
-          // Pre-capture failure: buyer hasn't approved yet, money NOT taken -> safe to revert to CREATED
-          order.status = 'CREATED';
-          orders[orderIndex] = order;
-          await writeJsonFile(ORDERS_FILE, orders);
+        const releaseErrorOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
 
-          const error = new Error('Payment was not approved yet. Please log into the PayPal popup and click "Pay Now" or "Complete Purchase".');
-          error.statusCode = 422;
+          if (issue === 'ORDER_NOT_APPROVED') {
+            // Pre-capture failure: safe to revert to CREATED
+            if (idx !== -1) {
+              freshOrders[idx].status = 'CREATED';
+              delete freshOrders[idx].reconciliationReason;
+              await writeJsonFile(ORDERS_FILE, freshOrders);
+            }
+            const error = new Error('Payment was not approved yet. Please log into the PayPal popup and click "Pay Now" or "Complete Purchase".');
+            error.statusCode = 422;
+            throw error;
+          }
+
+          if (issue === 'ORDER_ALREADY_CAPTURED') {
+            // Already captured on PayPal: retain CAPTURE_UNKNOWN
+            if (idx !== -1) {
+              freshOrders[idx].status = 'CAPTURE_UNKNOWN';
+              freshOrders[idx].reconciliationReason = 'PayPal indicates ORDER_ALREADY_CAPTURED. Reconciliation required.';
+              await writeJsonFile(ORDERS_FILE, freshOrders);
+            }
+            const error = new Error('Order was already captured on PayPal. Reconciling transaction record.');
+            error.statusCode = 409;
+            throw error;
+          }
+
+          // Network drop / timeout / 5xx gateway error
+          if (idx !== -1) {
+            freshOrders[idx].status = 'CAPTURE_UNKNOWN';
+            freshOrders[idx].reconciliationReason = `Uncertain outcome during capture dispatch: ${err.message}`;
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+
+          const error = new Error(`Payment capture outcome uncertain (${err.message}). Status locked as CAPTURE_UNKNOWN to prevent duplicate charge.`);
+          error.statusCode = 504;
           throw error;
+        } finally {
+          releaseErrorOrders();
         }
-
-        if (issue === 'ORDER_ALREADY_CAPTURED') {
-          // Already captured on PayPal side! Do not revert to CREATED!
-          order.status = 'CAPTURE_UNKNOWN';
-          order.reconciliationReason = 'PayPal indicates ORDER_ALREADY_CAPTURED. Reconciliation required.';
-          orders[orderIndex] = order;
-          await writeJsonFile(ORDERS_FILE, orders);
-
-          const error = new Error('Order was already captured on PayPal. Reconciling transaction record.');
-          error.statusCode = 409;
-          throw error;
-        }
-
-        // Network timeout, connection drop, 5xx gateway error
-        // Capture may have completed on PayPal, but response was lost: retain CAPTURE_UNKNOWN
-        order.status = 'CAPTURE_UNKNOWN';
-        order.reconciliationReason = `Uncertain outcome during capture dispatch: ${err.message}`;
-        order.updatedAt = new Date().toISOString();
-        orders[orderIndex] = order;
-        await writeJsonFile(ORDERS_FILE, orders);
-
-        const error = new Error(`Payment capture outcome uncertain (${err.message}). Status locked as CAPTURE_UNKNOWN to prevent duplicate charge.`);
-        error.statusCode = 504;
-        throw error;
       }
 
       // Successful HTTP response from PayPal
@@ -330,10 +366,18 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       captureStatus = captureData.status;
 
       if (captureStatus !== 'COMPLETED') {
-        order.status = 'CAPTURE_UNKNOWN';
-        order.reconciliationReason = `Non-completed PayPal status returned: ${captureStatus}`;
-        orders[orderIndex] = order;
-        await writeJsonFile(ORDERS_FILE, orders);
+        const releaseNonComplete = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'CAPTURE_UNKNOWN';
+            freshOrders[idx].reconciliationReason = `Non-completed PayPal status returned: ${captureStatus}`;
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseNonComplete();
+        }
 
         const error = new Error(`PayPal order capture was not completed. Status returned: ${captureStatus}`);
         error.statusCode = 422;
@@ -343,20 +387,56 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       const captureUnit = captureData.purchase_units?.[0]?.payments?.captures?.[0];
       captureId = captureUnit?.id || `CAP-${Date.now()}`;
       const capturedAmountStr = captureUnit?.amount?.value || order.amount;
+      const capturedCurrency = captureUnit?.amount?.currency_code || 'USD';
+      const expectedCurrency = order.currency || 'USD';
 
-      // Verify in exact integer cents
+      // 1. Currency verification
+      if (capturedCurrency !== expectedCurrency) {
+        const releaseCurrencyOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
+            freshOrders[idx].captureId = captureId;
+            freshOrders[idx].capturedAmount = capturedAmountStr;
+            freshOrders[idx].capturedCurrency = capturedCurrency;
+            freshOrders[idx].reconciliationReason = `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseCurrencyOrders();
+        }
+
+        const error = new Error(
+          `Critical currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}. Locked for manual reconciliation.`
+        );
+        error.statusCode = 422;
+        throw error;
+      }
+
+      // 2. Integer-cents amount verification
       const capturedCents = toCents(capturedAmountStr);
       const expectedCents = toCents(order.amount);
 
       if (capturedCents !== expectedCents) {
-        // PayPal took the funds, but amount differed: DO NOT REVERT TO CREATED! Lock as MANUAL_RECONCILIATION_REQUIRED
-        order.status = 'MANUAL_RECONCILIATION_REQUIRED';
-        order.captureId = captureId;
-        order.capturedAmount = capturedAmountStr;
-        order.reconciliationReason = `Critical financial mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`;
-        order.updatedAt = new Date().toISOString();
-        orders[orderIndex] = order;
-        await writeJsonFile(ORDERS_FILE, orders);
+        const releaseMismatchOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
+            freshOrders[idx].captureId = captureId;
+            freshOrders[idx].capturedAmount = capturedAmountStr;
+            freshOrders[idx].capturedCurrency = capturedCurrency;
+            freshOrders[idx].reconciliationReason = `Amount mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`;
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseMismatchOrders();
+        }
 
         const error = new Error(
           `Critical financial mismatch: Server expected $${order.amount} (${expectedCents} cents), ` +
@@ -371,19 +451,24 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
     }
 
     // Atomic & Idempotent Ledger Write
-    // Acquire ledger lock to serialize transactions.json across ALL orders
-    const releaseLedgerLock = await fileMutex.acquire('transactions-ledger-lock');
+    // Acquire locks in strict hierarchical order: orders-file-lock -> transactions-ledger-lock
+    const releaseSuccessOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+    const releaseLedgerLock = await fileMutex.acquire(LEDGER_LOCK_KEY);
     let newTransaction;
 
     try {
       // Update order state to CAPTURED
-      order.status = 'CAPTURED';
-      order.capturedAt = new Date().toISOString();
-      order.captureId = captureId;
-      orders[orderIndex] = order;
-      await writeJsonFile(ORDERS_FILE, orders);
+      const freshOrders = await readJsonFile(ORDERS_FILE, []);
+      const idx = freshOrders.findIndex(o => o.orderId === orderId);
+      if (idx !== -1) {
+        freshOrders[idx].status = 'CAPTURED';
+        freshOrders[idx].capturedAt = new Date().toISOString();
+        freshOrders[idx].captureId = captureId;
+        delete freshOrders[idx].reconciliationReason;
+        await writeJsonFile(ORDERS_FILE, freshOrders);
+      }
 
-      // Check if transaction row already exists (idempotency)
+      // Idempotent ledger write
       const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
       const existingTxn = transactions.find(t => 
         t.paypalOrderId === order.orderId || 
@@ -425,6 +510,7 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
       }
     } finally {
       releaseLedgerLock();
+      releaseSuccessOrders();
     }
 
     return {
@@ -446,7 +532,8 @@ export async function captureOrder(orderId, procurementMetadata = {}) {
  * 2. Unsticks any orders left in CAPTURING due to an unexpected process restart.
  */
 export async function reconcileLedgerAndOrders() {
-  const release = await fileMutex.acquire('reconciliation-lock');
+  const releaseOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+  const releaseLedger = await fileMutex.acquire(LEDGER_LOCK_KEY);
   try {
     const orders = await readJsonFile(ORDERS_FILE, []);
     const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
@@ -514,64 +601,208 @@ export async function reconcileLedgerAndOrders() {
       reconciledCount
     };
   } finally {
-    release();
+    releaseLedger();
+    releaseOrders();
   }
 }
 
 /**
- * Reconciles an order with uncertain status (CAPTURE_UNKNOWN) against PayPal Orders API.
+ * Reconciles an order with uncertain status (CAPTURE_UNKNOWN / MANUAL_RECONCILIATION_REQUIRED) against PayPal Orders API.
+ * Verifies exact integer-cents amount and currency code before marking CAPTURED.
+ * Supports injected response for hermetic unit testing without network calls.
  */
-export async function reconcileOrderWithPayPal(orderId) {
-  if (!orderId) {
+export async function reconcileOrderWithPayPal(orderId, injectedPayPalOrder = null) {
+  if (!orderId || typeof orderId !== 'string') {
     const error = new Error('orderId is required for PayPal reconciliation.');
     error.statusCode = 400;
     throw error;
   }
 
-  const release = await fileMutex.acquire(`order-lock-${orderId}`);
+  // Acquire order lock first to prevent concurrent actions on this order
+  const releaseOrderLock = await fileMutex.acquire(`order-lock-${orderId}`);
   try {
-    const orders = await readJsonFile(ORDERS_FILE, []);
-    const orderIndex = orders.findIndex(o => o.orderId === orderId);
+    let order;
 
-    if (orderIndex === -1) {
-      const error = new Error(`Order "${orderId}" not found in persistent orders registry.`);
-      error.statusCode = 404;
-      throw error;
+    // Read order under orders lock
+    const releaseReadOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+    try {
+      const orders = await readJsonFile(ORDERS_FILE, []);
+      const orderIndex = orders.findIndex(o => o.orderId === orderId);
+
+      if (orderIndex === -1) {
+        const error = new Error(`Order "${orderId}" not found in persistent orders registry.`);
+        error.statusCode = 404;
+        throw error;
+      }
+      order = orders[orderIndex];
+    } finally {
+      releaseReadOrders();
     }
 
-    const order = orders[orderIndex];
     if (order.mode !== 'SANDBOX') {
       return { success: true, status: order.status, message: 'Simulation orders do not require remote PayPal API reconciliation.' };
     }
 
-    const token = await getPayPalAccessToken();
-    const response = await axios.get(`${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
+    let paypalOrder;
+    if (injectedPayPalOrder) {
+      paypalOrder = injectedPayPalOrder;
+    } else {
+      const token = await getPayPalAccessToken();
+      const response = await axios.get(`${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      paypalOrder = response.data;
+    }
 
-    const paypalOrder = response.data;
     if (paypalOrder.status === 'COMPLETED') {
       const capture = paypalOrder.purchase_units?.[0]?.payments?.captures?.[0];
-      const captureId = capture ? capture.id : `REC-${Date.now()}`;
-      order.status = 'CAPTURED';
-      order.captureId = captureId;
-      order.capturedAt = new Date().toISOString();
-      delete order.reconciliationReason;
-      orders[orderIndex] = order;
-      await writeJsonFile(ORDERS_FILE, orders);
 
-      await reconcileLedgerAndOrders();
+      if (!capture) {
+        const releaseMissing = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
+            freshOrders[idx].reconciliationReason = 'PayPal order marked COMPLETED but no capture record found in purchase_units.';
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseMissing();
+        }
+        return { success: false, status: 'MANUAL_RECONCILIATION_REQUIRED', reason: 'Missing capture record in PayPal order' };
+      }
+
+      const captureId = capture.id;
+      const capturedAmountStr = capture.amount?.value;
+      const capturedCurrency = capture.amount?.currency_code || 'USD';
+      const expectedCurrency = order.currency || 'USD';
+
+      // 1. Verify currency match
+      if (capturedCurrency !== expectedCurrency) {
+        const releaseCurrMismatch = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
+            freshOrders[idx].captureId = captureId;
+            freshOrders[idx].capturedAmount = capturedAmountStr;
+            freshOrders[idx].capturedCurrency = capturedCurrency;
+            freshOrders[idx].reconciliationReason = `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`;
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseCurrMismatch();
+        }
+        return {
+          success: false,
+          status: 'MANUAL_RECONCILIATION_REQUIRED',
+          reason: `Currency mismatch: Server expected ${expectedCurrency}, but PayPal captured ${capturedCurrency}.`
+        };
+      }
+
+      // 2. Verify exact integer-cents amount match
+      const capturedCents = toCents(capturedAmountStr);
+      const expectedCents = toCents(order.amount);
+
+      if (capturedCents !== expectedCents) {
+        const releaseAmtMismatch = await fileMutex.acquire(ORDERS_LOCK_KEY);
+        try {
+          const freshOrders = await readJsonFile(ORDERS_FILE, []);
+          const idx = freshOrders.findIndex(o => o.orderId === orderId);
+          if (idx !== -1) {
+            freshOrders[idx].status = 'MANUAL_RECONCILIATION_REQUIRED';
+            freshOrders[idx].captureId = captureId;
+            freshOrders[idx].capturedAmount = capturedAmountStr;
+            freshOrders[idx].capturedCurrency = capturedCurrency;
+            freshOrders[idx].reconciliationReason = `Amount mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`;
+            freshOrders[idx].updatedAt = new Date().toISOString();
+            await writeJsonFile(ORDERS_FILE, freshOrders);
+          }
+        } finally {
+          releaseAmtMismatch();
+        }
+        return {
+          success: false,
+          status: 'MANUAL_RECONCILIATION_REQUIRED',
+          reason: `Amount mismatch: Server expected $${order.amount} (${expectedCents} cents), but PayPal captured $${capturedAmountStr} (${capturedCents} cents).`
+        };
+      }
+
+      // 3. Amount and currency are verified! Update to CAPTURED and write ledger idempotently
+      const releaseSuccessOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+      const releaseLedger = await fileMutex.acquire(LEDGER_LOCK_KEY);
+      try {
+        const freshOrders = await readJsonFile(ORDERS_FILE, []);
+        const idx = freshOrders.findIndex(o => o.orderId === orderId);
+        if (idx !== -1) {
+          freshOrders[idx].status = 'CAPTURED';
+          freshOrders[idx].captureId = captureId;
+          freshOrders[idx].capturedAmount = capturedAmountStr;
+          freshOrders[idx].capturedCurrency = capturedCurrency;
+          freshOrders[idx].capturedAt = capture.create_time || new Date().toISOString();
+          delete freshOrders[idx].reconciliationReason;
+          await writeJsonFile(ORDERS_FILE, freshOrders);
+        }
+
+        // Idempotent ledger write
+        const transactions = await readJsonFile(TRANSACTIONS_FILE, []);
+        const existingTxn = transactions.find(t => 
+          t.paypalOrderId === order.orderId || 
+          (captureId && t.paypalCaptureId === captureId)
+        );
+
+        if (!existingTxn) {
+          const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+          const newTransaction = {
+            transactionId: `TXN-2026-${randomSuffix}`,
+            paypalOrderId: order.orderId,
+            paypalCaptureId: captureId,
+            timestamp: capture.create_time || new Date().toISOString(),
+            supplierId: order.supplierId,
+            supplierName: order.supplierName,
+            product: order.product,
+            quantity: order.quantity,
+            unitPrice: order.unitPrice,
+            shippingCost: order.shippingCost,
+            totalAmount: parseFloat(order.amount),
+            maxBudget: order.maxBudget || 0,
+            estimatedSavings: order.estimatedSavings || 0,
+            realizedSavings: order.estimatedSavings || 0,
+            paymentStatus: "COMPLETED",
+            paymentMode: "SANDBOX_VERIFIED",
+            notes: `Settled and verified via PayPal Orders reconciliation (Capture ID: ${captureId})`
+          };
+          transactions.unshift(newTransaction);
+          await writeJsonFile(TRANSACTIONS_FILE, transactions);
+        }
+      } finally {
+        releaseLedger();
+        releaseSuccessOrders();
+      }
+
       return { success: true, status: 'CAPTURED', captureId, reconciled: true };
     } else if (paypalOrder.status === 'APPROVED' || paypalOrder.status === 'CREATED') {
-      order.status = 'CREATED';
-      delete order.reconciliationReason;
-      orders[orderIndex] = order;
-      await writeJsonFile(ORDERS_FILE, orders);
+      const releaseRevertOrders = await fileMutex.acquire(ORDERS_LOCK_KEY);
+      try {
+        const freshOrders = await readJsonFile(ORDERS_FILE, []);
+        const idx = freshOrders.findIndex(o => o.orderId === orderId);
+        if (idx !== -1) {
+          freshOrders[idx].status = 'CREATED';
+          delete freshOrders[idx].reconciliationReason;
+          await writeJsonFile(ORDERS_FILE, freshOrders);
+        }
+      } finally {
+        releaseRevertOrders();
+      }
       return { success: true, status: 'CREATED', message: 'Order was uncaptured on PayPal. Reverted to CREATED.' };
     }
 
     return { success: true, status: paypalOrder.status };
   } finally {
-    release();
+    releaseOrderLock();
   }
 }

@@ -66,14 +66,18 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, async () => {
-  console.log(`🚀 Procura Server listening on http://localhost:${PORT}`);
-  try {
-    const recovery = await reconcileLedgerAndOrders();
-    if (recovery.reconciledCount > 0) {
-      console.log(`[Auto-Recovery] Reconciled ${recovery.reconciledCount} missing transaction record(s).`);
+export default app;
+
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, async () => {
+    console.log(`🚀 Procura Server listening on http://localhost:${PORT}`);
+    try {
+      const recovery = await reconcileLedgerAndOrders();
+      if (recovery.reconciledCount > 0) {
+        console.log(`[Auto-Recovery] Reconciled ${recovery.reconciledCount} missing transaction record(s).`);
+      }
+    } catch (recErr) {
+      console.warn(`[Auto-Recovery Notice]:`, recErr.message);
     }
-  } catch (recErr) {
-    console.warn(`[Auto-Recovery Notice]:`, recErr.message);
-  }
-});
+  });
+}

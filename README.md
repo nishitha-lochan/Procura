@@ -543,7 +543,7 @@ npm test
 ```
 *(Or navigate to `server/` and run `node tests/testScoring.js`).*
 
-### Test Coverage Summary (87 Assertions Across 6 Domains — 81 Executed Passing Assertions):
+### Test Coverage Summary (113 Executed Passing Assertions Across 9 Verification Domains):
 - **1. Financial Precision & Integer Cents (18 tests)**: Asserts that `toCents()` eliminates floating-point currency drift (`0.1 + 0.2 === 0.3`), tests string parsing, null/NaN sanitization, landed cost calculation, and budget-relative savings. Validates strict positive integer parsing (accepts `10`, `"25"`; rejects decimals `2.5`, `"2.5"`, malformed strings `"10abc"`, zero, negatives, and NaN).
 - **2. 5-Dimensional Scoring Engine (25 tests)**:
   - *Landed Cost (35%)*: Range-normalized score bounds (cheapest = 100, most expensive = 0, midpoint = 50, identical prices = 100).
@@ -555,7 +555,10 @@ npm test
 - **3. Quotation Comparison & Ranking (11 tests)**: Validates full catalogue ranking, stock and budget pre-filtering (SUP-003 disqualified for 80 < 100 units), zero budget handling, over-budget rejection, and empty catalogue safety.
 - **4. Requirement Extraction & Heuristics (7 tests)**: Verifies that delivery days ("5 days") are never mistaken for order quantity and product model numbers ("5540") are never mistaken for budget or quantity.
 - **5. Server-Side Order Validation (9 tests)**: Validates that `createOrder` enforces positive integer quantities (rejecting negatives, decimals `2.5`, and strings `"10abc"` with HTTP 400), rejects non-existent suppliers (404), rejects orders exceeding available inventory (400), and rejects orders exceeding budget caps (400).
-- **6. Order State Machine, Double-Capture Protection & Reconciliation (5 tests)**: Verifies `CREATED` -> `CAPTURING` -> `CAPTURED` lifecycle, validates successful simulation capture with integer cents, rejects invalid order IDs (404), strictly blocks double capture attempts with HTTP 409 Conflict, and verifies automated startup ledger reconciliation.
+- **6. Order State Machine & Double-Capture Protection (4 tests)**: Verifies `CREATED` -> `CAPTURING` -> `CAPTURED` lifecycle, validates successful simulation capture with integer cents, rejects invalid order IDs (404), and strictly blocks double capture attempts with HTTP 409 Conflict.
+- **7. PayPal Capture Reconciliation & Mismatch Defense (11 tests)**: Tests that PayPal `COMPLETED` capture amounts and currencies are verified against stored authoritative values; rejects capture amount mismatches and currency mismatches by transitioning to `MANUAL_RECONCILIATION_REQUIRED`; asserts that no falsified ledger entry is created on mismatch; and verifies that reconciliation creates exactly 1 idempotent ledger row.
+- **8. Concurrent Order Creation & Parallel Capture Safety (17 tests)**: Concurrently creates 5 distinct orders under `orders-file-lock` to verify that no order record is overwritten; executes 3 concurrent captures in parallel under `order-lock-${orderId}` and `transactions-ledger-lock` to assert that all 3 orders transition to `CAPTURED` and commit distinct ledger transactions.
+- **9. Ledger Failure Recovery & Gemini Financial Narrative (11 tests)**: Simulates a crash between order write and ledger write, asserting that `reconcileLedgerAndOrders()` automatically recovers missing ledger transactions; verifies that `buildAuthoritativeRecommendationNarrative()` strictly enforces deterministic landed cost, budget, savings, and scores, while cleansing any hallucinated dollar amounts from LLM text.
 
 Verified test output:
 ```text
@@ -654,10 +657,48 @@ Verified test output:
 ✅ PASS: Captured order has COMPLETED status
 ✅ PASS: Transaction records exact totalAmount $670 (got 670)
 ✅ PASS: Double capture attempt throws HTTP 409 Conflict (got 409)
-✅ PASS: reconcileLedgerAndOrders runs cleanly without errors
+
+--- 7. PayPal Capture Reconciliation & Mismatch Defense ---
+✅ PASS: PayPal reconciliation succeeds when capture amount and currency match
+✅ PASS: Reconciled order transitions to CAPTURED
+✅ PASS: Reconciliation rejects capture amount mismatch ($500.00 vs $670.00)
+✅ PASS: Mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Persisted order state is MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Captured amount ($500.00) is saved for manual audit
+✅ PASS: No falsified ledger transaction is created for mismatched order
+✅ PASS: Reconciliation rejects currency mismatch (EUR vs USD)
+✅ PASS: Currency mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED
+✅ PASS: Second reconciliation confirms CAPTURED status
+✅ PASS: Reconciliation idempotently creates exactly 1 ledger transaction (found 1)
+
+--- 8. Concurrent Order Creation & Parallel Capture Safety ---
+✅ PASS: Executed 5 concurrent order creations simultaneously
+✅ PASS: Concurrent order persisted in orders.json without overwrite loss
+✅ PASS: Concurrent order persisted in orders.json without overwrite loss
+✅ PASS: Concurrent order persisted in orders.json without overwrite loss
+✅ PASS: Concurrent order persisted in orders.json without overwrite loss
+✅ PASS: Concurrent order persisted in orders.json without overwrite loss
+✅ PASS: Executed 3 concurrent captures simultaneously
+✅ PASS: Concurrent captured order correctly transitioned to CAPTURED
+✅ PASS: Concurrent captured order correctly transitioned to CAPTURED
+✅ PASS: Concurrent captured order correctly transitioned to CAPTURED
+✅ PASS: Concurrent capture has distinct committed transaction in ledger
+✅ PASS: Concurrent capture has distinct committed transaction in ledger
+✅ PASS: Concurrent capture has distinct committed transaction in ledger
+
+--- 9. Ledger Failure Recovery & Gemini Financial Narrative ---
+✅ PASS: reconcileLedgerAndOrders executed successfully
+✅ PASS: Missing ledger entry for ghost CAPTURED order was automatically recovered
+✅ PASS: Recovered ledger entry preserves authoritative financial total ($460.00)
+✅ PASS: Narrative enforces exact backend landed cost ($4450.00)
+✅ PASS: Narrative strips out hallucinated price ($2,999.00)
+✅ PASS: Narrative enforces exact backend savings ($550.00)
+✅ PASS: Narrative strips out hallucinated savings ($2,001.00)
+✅ PASS: Narrative enforces exact backend composite score (89.6/100)
+✅ PASS: Narrative enforces authoritative supplier name
 
 ================================================================
-     TEST EXECUTION COMPLETE: 81 PASSED, 0 FAILED
+     TEST EXECUTION COMPLETE: 113 PASSED, 0 FAILED
 ================================================================
 ```
 

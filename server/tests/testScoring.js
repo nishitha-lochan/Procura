@@ -1,3 +1,5 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   toCents,
   fromCents,
@@ -15,7 +17,19 @@ import {
   isStrictPositiveInteger
 } from '../utils/calculations.js';
 import { getQuotes, extractRequirements, compareQuotes } from '../services/procurementService.js';
-import { createOrder, captureOrder, reconcileLedgerAndOrders } from '../services/paypalService.js';
+import {
+  createOrder,
+  captureOrder,
+  reconcileLedgerAndOrders,
+  reconcileOrderWithPayPal
+} from '../services/paypalService.js';
+import { buildAuthoritativeRecommendationNarrative } from '../services/geminiService.js';
+import { readJsonFile, writeJsonFile } from '../utils/storage.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ORDERS_FILE = path.join(__dirname, '../data/orders.json');
+const TRANSACTIONS_FILE = path.join(__dirname, '../data/transactions.json');
 
 console.log('================================================================');
 console.log('     PROCURA — COMPREHENSIVE PRODUCTION TEST SUITE             ');
@@ -229,7 +243,7 @@ async function runTests() {
   assert(simOrder.amount === '670.00', `Authoritative landed cost for 10 units is $670.00 (got ${simOrder.amount})`);
 
   // -------------------------------------------------------------------------
-  // 6. ORDER STATE MACHINE, DOUBLE-CAPTURE PROTECTION & RECONCILIATION
+  // 6. ORDER STATE MACHINE & DOUBLE-CAPTURE PROTECTION
   // -------------------------------------------------------------------------
   console.log('\n--- 6. Order State Machine & Double-Capture Protection ---');
 
@@ -255,9 +269,210 @@ async function runTests() {
     assert(err.statusCode === 409, `Double capture attempt throws HTTP 409 Conflict (got ${err.statusCode})`);
   }
 
-  // Test 6d: Auto-Reconciliation of Ledger
-  const recResult = await reconcileLedgerAndOrders();
-  assert(recResult.success === true, 'reconcileLedgerAndOrders runs cleanly without errors');
+  // -------------------------------------------------------------------------
+  // 7. PAYPAL RECONCILIATION AMOUNT, CURRENCY & IDEMPOTENCY VERIFICATION
+  // -------------------------------------------------------------------------
+  console.log('\n--- 7. PayPal Capture Reconciliation & Mismatch Defense ---');
+
+  // Test 7a: PayPal capture amount matches stored order
+  const recOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders = await readJsonFile(ORDERS_FILE, []);
+  const recIdx = allOrders.findIndex(o => o.orderId === recOrder.orderID);
+  allOrders[recIdx].mode = 'SANDBOX';
+  allOrders[recIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders);
+
+  const mockValidCaptureId = `CAP-VALID-${Date.now()}`;
+  const mockValidPayPal = {
+    id: recOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {
+        captures: [{
+          id: mockValidCaptureId,
+          status: 'COMPLETED',
+          amount: { value: '670.00', currency_code: 'USD' },
+          create_time: new Date().toISOString()
+        }]
+      }
+    }]
+  };
+
+  const recResult = await reconcileOrderWithPayPal(recOrder.orderID, mockValidPayPal);
+  assert(recResult.success === true, 'PayPal reconciliation succeeds when capture amount and currency match');
+  assert(recResult.status === 'CAPTURED', 'Reconciled order transitions to CAPTURED');
+
+  // Test 7b: PayPal capture amount mismatch is rejected
+  const mismatchOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders2 = await readJsonFile(ORDERS_FILE, []);
+  const misIdx = allOrders2.findIndex(o => o.orderId === mismatchOrder.orderID);
+  allOrders2[misIdx].mode = 'SANDBOX';
+  allOrders2[misIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders2);
+
+  const mockAmountMismatch = {
+    id: mismatchOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {
+        captures: [{
+          id: `CAP-MIS-${Date.now()}`,
+          status: 'COMPLETED',
+          amount: { value: '500.00', currency_code: 'USD' }
+        }]
+      }
+    }]
+  };
+
+  const misResult = await reconcileOrderWithPayPal(mismatchOrder.orderID, mockAmountMismatch);
+  assert(misResult.success === false, 'Reconciliation rejects capture amount mismatch ($500.00 vs $670.00)');
+  assert(misResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED');
+
+  const checkedMismatchOrder = (await readJsonFile(ORDERS_FILE, [])).find(o => o.orderId === mismatchOrder.orderID);
+  assert(checkedMismatchOrder.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Persisted order state is MANUAL_RECONCILIATION_REQUIRED');
+  assert(checkedMismatchOrder.capturedAmount === '500.00', 'Captured amount ($500.00) is saved for manual audit');
+
+  const txnsAfterMismatch = await readJsonFile(TRANSACTIONS_FILE, []);
+  const mismatchTxn = txnsAfterMismatch.find(t => t.paypalOrderId === mismatchOrder.orderID);
+  assert(mismatchTxn === undefined, 'No falsified ledger transaction is created for mismatched order');
+
+  // Test 7c: Currency mismatch is rejected
+  const currOrder = await createOrder('SUP-001', 10, 1000, true);
+  const allOrders3 = await readJsonFile(ORDERS_FILE, []);
+  const currIdx = allOrders3.findIndex(o => o.orderId === currOrder.orderID);
+  allOrders3[currIdx].mode = 'SANDBOX';
+  allOrders3[currIdx].status = 'CAPTURE_UNKNOWN';
+  await writeJsonFile(ORDERS_FILE, allOrders3);
+
+  const mockCurrencyMismatch = {
+    id: currOrder.orderID,
+    status: 'COMPLETED',
+    purchase_units: [{
+      payments: {
+        captures: [{
+          id: `CAP-CURR-${Date.now()}`,
+          status: 'COMPLETED',
+          amount: { value: '670.00', currency_code: 'EUR' }
+        }]
+      }
+    }]
+  };
+
+  const currResult = await reconcileOrderWithPayPal(currOrder.orderID, mockCurrencyMismatch);
+  assert(currResult.success === false, 'Reconciliation rejects currency mismatch (EUR vs USD)');
+  assert(currResult.status === 'MANUAL_RECONCILIATION_REQUIRED', 'Currency mismatch transitions order to MANUAL_RECONCILIATION_REQUIRED');
+
+  // Test 7d & 7e: Reconciliation idempotency and single ledger record
+  const secondRecResult = await reconcileOrderWithPayPal(recOrder.orderID, mockValidPayPal);
+  assert(secondRecResult.status === 'CAPTURED', 'Second reconciliation confirms CAPTURED status');
+
+  const allTxnsAfterRec = await readJsonFile(TRANSACTIONS_FILE, []);
+  const matchingRecTxns = allTxnsAfterRec.filter(t => t.paypalOrderId === recOrder.orderID);
+  assert(matchingRecTxns.length === 1, `Reconciliation idempotently creates exactly 1 ledger transaction (found ${matchingRecTxns.length})`);
+
+  // -------------------------------------------------------------------------
+  // 8. CONCURRENCY CONTROL (ORDERS.JSON & PARALLEL CAPTURES)
+  // -------------------------------------------------------------------------
+  console.log('\n--- 8. Concurrent Order Creation & Parallel Capture Safety ---');
+
+  // Test 8a: Concurrent creation of 5 distinct orders
+  const concurrentCreations = await Promise.all([
+    createOrder('SUP-001', 1, 0, true),
+    createOrder('SUP-002', 2, 0, true),
+    createOrder('SUP-004', 1, 0, true),
+    createOrder('SUP-005', 2, 0, true),
+    createOrder('SUP-006', 1, 0, true)
+  ]);
+  assert(concurrentCreations.length === 5, 'Executed 5 concurrent order creations simultaneously');
+
+  const ordersAfterConcurrent = await readJsonFile(ORDERS_FILE, []);
+  for (const created of concurrentCreations) {
+    const found = ordersAfterConcurrent.find(o => o.orderId === created.orderID);
+    assert(found !== undefined, `Concurrent order ${created.orderID} persisted in orders.json without overwrite loss`);
+  }
+
+  // Test 8b: Concurrent capture of 3 distinct orders
+  const concurrentCaptures = await Promise.all([
+    captureOrder(concurrentCreations[0].orderID),
+    captureOrder(concurrentCreations[1].orderID),
+    captureOrder(concurrentCreations[2].orderID)
+  ]);
+  assert(concurrentCaptures.length === 3, 'Executed 3 concurrent captures simultaneously');
+
+  const freshOrdersAfterCaptures = await readJsonFile(ORDERS_FILE, []);
+  for (let i = 0; i < 3; i++) {
+    const oId = concurrentCreations[i].orderID;
+    const found = freshOrdersAfterCaptures.find(o => o.orderId === oId);
+    assert(found.status === 'CAPTURED', `Concurrent captured order ${oId} correctly transitioned to CAPTURED`);
+  }
+
+  const freshTxnsAfterCaptures = await readJsonFile(TRANSACTIONS_FILE, []);
+  for (let i = 0; i < 3; i++) {
+    const oId = concurrentCreations[i].orderID;
+    const foundTxn = freshTxnsAfterCaptures.find(t => t.paypalOrderId === oId);
+    assert(foundTxn !== undefined, `Concurrent capture ${oId} has distinct committed transaction in ledger`);
+  }
+
+  // -------------------------------------------------------------------------
+  // 9. LEDGER FAILURE RECOVERY & GEMINI AUTHORITATIVE NARRATIVE
+  // -------------------------------------------------------------------------
+  console.log('\n--- 9. Ledger Failure Recovery & Gemini Financial Narrative ---');
+
+  // Test 9a: Ledger failure and recovery behavior
+  const ghostOrderId = `SIM-ORDER-GHOST-${Date.now()}`;
+  const ghostCaptureId = `SIM-CAPTURE-GHOST-${Date.now()}`;
+  const ghostOrder = {
+    orderId: ghostOrderId,
+    supplierId: 'SUP-001',
+    supplierName: 'Apex Office Solutions [DEMO DATA]',
+    product: 'Ergonomic Mesh Task Chair',
+    quantity: 5,
+    unitPrice: 42.00,
+    shippingCost: 250.00,
+    amount: '460.00',
+    currency: 'USD',
+    maxBudget: 1000,
+    estimatedSavings: 540,
+    status: 'CAPTURED',
+    captureId: ghostCaptureId,
+    mode: 'SIMULATION',
+    createdAt: new Date().toISOString(),
+    capturedAt: new Date().toISOString()
+  };
+
+  const ordersForGhost = await readJsonFile(ORDERS_FILE, []);
+  ordersForGhost.push(ghostOrder);
+  await writeJsonFile(ORDERS_FILE, ordersForGhost);
+
+  const recoveryResult = await reconcileLedgerAndOrders();
+  assert(recoveryResult.success === true, 'reconcileLedgerAndOrders executed successfully');
+
+  const txnsAfterRecovery = await readJsonFile(TRANSACTIONS_FILE, []);
+  const ghostTxn = txnsAfterRecovery.find(t => t.paypalOrderId === ghostOrderId);
+  assert(ghostTxn !== undefined, 'Missing ledger entry for ghost CAPTURED order was automatically recovered');
+  assert(ghostTxn.totalAmount === 460.00, 'Recovered ledger entry preserves authoritative financial total ($460.00)');
+
+  // Test 9b: Gemini financial narrative remains backend-authoritative
+  const mockTopQuote = {
+    supplierId: 'SUP-001',
+    name: 'Apex Office Solutions',
+    totalCost: 4450.00,
+    estimatedSavings: 550.00,
+    compositeScore: 89.6,
+    warranty: '5-Year Commercial Warranty',
+    estimatedDeliveryDays: 5,
+    riskLevel: 'Low Risk'
+  };
+
+  const hallucinatedLLMText = "Apex is recommended for $2,999.00 saving $2,001.00 because of superior freight SLA and warranty.";
+  const narrative = buildAuthoritativeRecommendationNarrative(mockTopQuote, 5000, hallucinatedLLMText);
+
+  assert(narrative.includes('$4450.00'), 'Narrative enforces exact backend landed cost ($4450.00)');
+  assert(!narrative.includes('$2,999.00'), 'Narrative strips out hallucinated price ($2,999.00)');
+  assert(narrative.includes('$550.00'), 'Narrative enforces exact backend savings ($550.00)');
+  assert(!narrative.includes('$2,001.00'), 'Narrative strips out hallucinated savings ($2,001.00)');
+  assert(narrative.includes('89.6/100'), 'Narrative enforces exact backend composite score (89.6/100)');
+  assert(narrative.includes('Apex Office Solutions'), 'Narrative enforces authoritative supplier name');
 
   console.log('\n================================================================');
   console.log(`     TEST EXECUTION COMPLETE: ${passed} PASSED, ${failed} FAILED`);

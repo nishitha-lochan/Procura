@@ -2,10 +2,42 @@ import { genAI, GEMINI_MODEL, isGeminiConfigured } from '../config/gemini.js';
 import { extractRequirements, getQuotes, compareQuotes } from './procurementService.js';
 
 /**
+ * Constructs the final recommendation narrative ensuring all financial metrics
+ * (supplier name, landed cost, budget, savings, composite score) originate strictly
+ * from deterministic backend calculations, while Gemini contributes qualitative rationale.
+ */
+export function buildAuthoritativeRecommendationNarrative(topSupplier, budget, qualitativeReasoning = '') {
+  if (!topSupplier) {
+    return 'No compliant suppliers meet the requested requisition criteria.';
+  }
+
+  const budgetNum = parseFloat(budget) || 0;
+  const costStr = `$${topSupplier.totalCost.toFixed(2)}`;
+  const savingsStr = topSupplier.estimatedSavings > 0
+    ? ` (saving $${topSupplier.estimatedSavings.toFixed(2)} against the $${budgetNum.toFixed(2)} budget cap)`
+    : '';
+  const scoreStr = `${topSupplier.compositeScore}/100`;
+
+  // Sanitize qualitative reasoning to prevent LLM price/financial hallucinations
+  let cleanQualitative = (qualitativeReasoning || '')
+    .replace(/\$\s*[\d,]+(?:\.\d{2})?/g, '') // strip any hallucinated dollar amounts
+    .replace(/\b(?:budget|cost|price|savings|landed)\s*(?:is|of|was|at)?\s*[\d,]+(?:\.\d{2})?\b/gi, '') // strip cost statements
+    .replace(/^.*?(is recommended|chosen|selected)[^.]*\.\s*/i, '') // strip redundant lead-ins
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (!cleanQualitative || cleanQualitative.length < 15) {
+    cleanQualitative = `It provides the strongest overall balance across commercial warranty (${topSupplier.warranty}), delivery SLA (${topSupplier.estimatedDeliveryDays} days), and ${topSupplier.riskLevel} profile.`;
+  }
+
+  return `${topSupplier.name} is recommended with the highest composite score of ${scoreStr} at an authoritative landed settlement of ${costStr}${savingsStr}. ${cleanQualitative}`;
+}
+
+/**
  * Runs the Gemini procurement agent.
  * 1. Invokes Gemini to extract structured procurement requirements (item, quantity, budget, priority).
  * 2. Invokes deterministic quote retrieval and multi-factor comparison engine.
- * 3. Invokes Gemini to synthesize the executive recommendation narrative.
+ * 3. Invokes Gemini to synthesize qualitative operational risk and trade-off analysis.
  * Gracefully falls back to deterministic copilot if Gemini is unconfigured or rate-limited.
  */
 export async function runProcurementAgent(userPrompt) {
@@ -94,7 +126,7 @@ export async function runProcurementAgent(userPrompt) {
       tool: "reason_supplier_tradeoffs_and_risks",
       args: {
         candidateCount: quotes.length,
-        recommendedSupplier: topSupplier?.name,
+        recommendedSupplier: topSupplier?.name || "None",
         evaluationDimensions: ["Price", "Delivery SLA", "Warranty", "Stock Availability", "Risk Level"]
       }
     });
@@ -137,7 +169,7 @@ ${JSON.stringify(comparisonResult.comparison.map(c => ({
 })), null, 2)}
 
 Provide:
-1. An executive qualitative rationale (2 sentences) explaining why ${topSupplier.name} was chosen over competitors across Delivery SLA, Warranty Coverage, Stock Cushion, and Operational Risk.
+1. An executive qualitative rationale (2 sentences) explaining why ${topSupplier.name} was chosen over competitors across Delivery SLA, Warranty Coverage, Stock Cushion, and Operational Risk. Do not include dollar amounts or financial calculations.
 2. Explicit operational/financial risk analysis for each supplier (especially explaining why the non-recommended suppliers pose higher operational or supply chain risk).`;
 
         const reasoningResponse = await genAI.models.generateContent({
@@ -172,11 +204,11 @@ Provide:
         if (reasoningResponse.text) {
           const parsedReasoning = JSON.parse(reasoningResponse.text);
           if (parsedReasoning.executiveRecommendation) {
-            // Anchor financial numbers deterministically to prevent LLM arithmetic hallucination
-            const deterministicPrefix = `${topSupplier.name} is recommended at an authoritative landed settlement of $${topSupplier.totalCost.toFixed(2)}` +
-              (topSupplier.estimatedSavings > 0 ? ` (saving $${topSupplier.estimatedSavings.toFixed(2)} vs budget). ` : '. ');
-            
-            narrativeText = `${deterministicPrefix}${parsedReasoning.executiveRecommendation}`;
+            narrativeText = buildAuthoritativeRecommendationNarrative(
+              topSupplier,
+              requirements.maxBudget,
+              parsedReasoning.executiveRecommendation
+            );
           }
           if (parsedReasoning.supplierRisks && Array.isArray(parsedReasoning.supplierRisks)) {
             // Merge with deterministic supplier list
@@ -197,6 +229,12 @@ Provide:
       }
     }
 
+    // Synchronize recommendation summary with authoritative narrative
+    const finalRecommendation = {
+      ...comparisonResult.recommendation,
+      summary: narrativeText
+    };
+
     return {
       success: true,
       agentMode: 'GEMINI_AUTONOMOUS',
@@ -205,7 +243,7 @@ Provide:
       supplierRisks,
       requirements,
       comparison: comparisonResult.comparison,
-      recommendation: comparisonResult.recommendation,
+      recommendation: finalRecommendation,
       toolTrace,
       totalTurns: 4
     };
@@ -244,6 +282,17 @@ async function runDeterministicFallback(userPrompt, notice = "") {
       : (s.riskFactors || `${s.riskLevel} - Verified commercial SLA profile.`)
   }));
 
+  const narrativeText = buildAuthoritativeRecommendationNarrative(
+    topSupplier,
+    requirements.maxBudget,
+    topSupplier?.notes || ''
+  );
+
+  const finalRecommendation = {
+    ...comparisonResult.recommendation,
+    summary: narrativeText
+  };
+
   const toolTrace = [
     { turn: 1, tool: "extract_procurement_requirements", args: { prompt: userPrompt } },
     { turn: 2, tool: "get_supplier_quotes", args: { category: targetCategory } },
@@ -255,11 +304,11 @@ async function runDeterministicFallback(userPrompt, notice = "") {
     success: true,
     agentMode: 'DETERMINISTIC_COPILOT',
     notice,
-    recommendationText: comparisonResult.recommendation.summary,
+    recommendationText: narrativeText,
     supplierRisks,
     requirements,
     comparison: comparisonResult.comparison,
-    recommendation: comparisonResult.recommendation,
+    recommendation: finalRecommendation,
     toolTrace,
     totalTurns: 4
   };
