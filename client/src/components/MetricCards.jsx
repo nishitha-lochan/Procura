@@ -442,9 +442,11 @@ export default function MetricCards({
               color: 'var(--text-muted)'
             }}
           >
-            <span>Peak settlement: <strong>${(timelineData.length > 0 ? Math.max(...timelineData.map(d => d.spend), 0) : 0).toLocaleString()}</strong></span>
-            <span style={{ color: timelineData.length > 0 ? 'var(--accent-mint)' : 'var(--text-muted)' }}>
-              {timelineData.length > 0 ? 'Consistent 0% Settlement Variance' : 'Awaiting Settlements'}
+            <span>Peak settlement: <strong>${(timelineData.length > 0 ? Math.max(...timelineData.map(d => d.spend), 0) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+            <span style={{ color: transactions.length > 0 ? 'var(--accent-mint)' : 'var(--text-muted)' }}>
+              {transactions.length > 0
+                ? `${transactions.length} Verified Settlement${transactions.length === 1 ? '' : 's'}`
+                : 'Awaiting Settlements'}
             </span>
           </div>
         </div>

@@ -221,7 +221,7 @@ export default function App() {
               config={config}
               isSimMode={isSimMode}
               onPaymentSuccess={handlePaymentSuccess}
-              onClose={() => setSelectedSupplier(null)}
+              onClose={() => saveSelectedSupplier(null)}
             />
           )}
 

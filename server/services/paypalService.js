@@ -14,7 +14,6 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const SEED_DIR = path.join(__dirname, '../data/seed');
 
 export function getOrdersFilePath() {
   const ordersPath = process.env.ORDERS_FILE_PATH || path.join(__dirname, '../data/orders.json');
